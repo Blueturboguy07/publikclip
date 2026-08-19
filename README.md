@@ -20,7 +20,8 @@ horizontal video file and produces vertical 9:16 clips with:
 Every model — speech recognition, forced alignment, diarization, laughter
 detection, audio tagging, face detection, active-speaker detection — runs
 locally. The only network calls are the video download and 2–3 small LLM calls
-(bring your own Gemini key, or run fully local via Ollama at reduced scoring
+(bring your own OpenRouter key, run on Bedrock founder credits, or run
+fully local via Ollama at reduced scoring
 quality).
 
 ## Status
@@ -59,7 +60,18 @@ open /Applications/publikclip.app
 
 The app downloads its speech/audio models (~4–5 GB) on first run with a
 progress UI, and fetches a caption-capable static ffmpeg automatically if the
-machine has none. Scoring uses your own Gemini API key, or a local Ollama
+machine has none. Scoring runs on the production ladder by default
+(`llm_mode` = `auto`): **Amazon Bedrock first** (founder credits, boto3
+default chain, `amazon.nova-pro-v1:0`), then **our RHOBEAR agent gateway**
+(`http://127.0.0.1:8780/v1`, `RHOBEAR_GATEWAY_KEY`, `claude-cli/opus-4-8`
+subscription route), then **OpenRouter** (BYO key,
+`PUBLIKCLIP_OPENROUTER_API_KEY`, default model `z-ai/glm-4.5v`) as
+last-resort remote, and finally a local Ollama model at reduced scoring
+quality if you select it explicitly. Each failing backend falls through to
+the next with its reason recorded. Pick a single backend with the
+`llm_mode` setting (`auto` | `bedrock` | `gateway` | `openrouter` |
+`ollama`) or the `--llm` CLI flag; keys resolve from env vars or
+`PUBLIKCLIP_HOME/secrets.json`.
 model at reduced scoring quality — onboarding walks through both.
 
 ## Install from source (Windows)

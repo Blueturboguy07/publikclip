@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-# --- T1 structured-output schema (Gemini responseSchema / Ollama format) ---
+# --- T1 structured-output schema (LLM JSON mode / Ollama format) ---
 
 T1_SCHEMA: dict[str, Any] = {
     "type": "object",

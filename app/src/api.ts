@@ -8,7 +8,7 @@ export const api = {
     invoke<void>('resume_job', { jobId, llm, captions, camera }),
   jobResults: (jobId: string) => invoke<JobResults>('job_results', { jobId }),
   listJobs: () => invoke<JobSummary[]>('list_job_dirs'),
-  saveGeminiKey: (key: string) => invoke<boolean>('save_gemini_key', { key }),
+  saveLlmKey: (kind: string, key: string) => invoke<boolean>('save_llm_key', { kind, key }),
   setupState: () => invoke<SetupState>('get_setup_state'),
   markOnboarded: () => invoke<void>('mark_onboarded'),
   checkOllama: () => invoke<{ running: boolean; models: string[] }>('check_ollama'),

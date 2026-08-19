@@ -5,7 +5,7 @@ explicit things being talked about (objects, places, amounts, situations).
 Deliberately generous (the user wants overdone-and-removable); every item
 lands on the timeline where it can be deleted, moved, resized.
 
-Fetchers: Pexels (free BYO key, real photos, license-clean) and Gemini
+Fetchers: Pexels (free BYO key, real photos, license-clean) and OpenRouter
 image generation (the funded key's image models — on-topic for absurd or
 specific scenes stock can't match). Images cache into
 <job_dir>/overlays/ and are referenced by path in the edit state.
@@ -124,44 +124,54 @@ def fetch_pexels(query: str, job_dir: Path) -> str | None:
         return None
 
 
-GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
+OPENROUTER_IMAGE_MODEL = os.environ.get("PUBLIKCLIP_IMAGE_MODEL", "black-forest-labs/flux-1.1-pro")
 
 
-def fetch_gemini(query: str, job_dir: Path) -> str | None:
-    key = llm_mod.gemini_api_key()
+def fetch_ai_image(query: str, job_dir: Path) -> str | None:
+    """AI-generated overlay via OpenRouter image models."""
+    key = os.environ.get("PUBLIKCLIP_OPENROUTER_API_KEY") or llm_mod._secrets_value("openrouter_api_key")
     if not key:
         return None
-    dest = _overlay_dir(job_dir) / f"gm_{hashlib.sha256(query.encode()).hexdigest()[:12]}.png"
+    dest = _overlay_dir(job_dir) / f"ai_{hashlib.sha256(query.encode()).hexdigest()[:12]}.png"
     if dest.exists():
         return str(dest)
     try:
         res = httpx.post(
-            llm_mod.GEMINI_URL.format(model=GEMINI_IMAGE_MODEL),
-            params={"key": key},
+            llm_mod.OPENROUTER_URL,
+            headers={"Authorization": f"Bearer {key}"},
             json={
-                "contents": [{"parts": [{"text": f"A clean, punchy illustrative photo for a video overlay: {query}. No text in the image."}]}],
-                "generationConfig": {"responseModalities": ["IMAGE"]},
+                "model": OPENROUTER_IMAGE_MODEL,
+                "messages": [{"role": "user", "content": f"A clean, punchy illustrative photo for a video overlay: {query}. No text in the image."}],
+                "modalities": ["image"],
             },
-            timeout=60.0,
+            timeout=120.0,
         )
         res.raise_for_status()
-        for part in res.json()["candidates"][0]["content"]["parts"]:
-            data = part.get("inlineData") or part.get("inline_data")
-            if data and data.get("data"):
-                import base64
+        payload = res.json()
+        import base64
 
-                dest.write_bytes(base64.b64decode(data["data"]))
+        # OpenRouter returns image content blocks: [{"type": "image", "image_url": {"url": "data:image/...;base64,..."}}]
+        for part in payload["choices"][0]["message"].get("content", []):
+            if isinstance(part, dict) and part.get("type") == "image":
+                url = (part.get("image_url") or {}).get("url", "")
+                if url.startswith("data:image/"):
+                    dest.write_bytes(base64.b64decode(url.split(",", 1)[1]))
+                    return str(dest)
+        # Some models report a plain base64 list instead.
+        for b64 in payload["choices"][0]["message"].get("images", []):
+            if isinstance(b64, str) and b64:
+                dest.write_bytes(base64.b64decode(b64))
                 return str(dest)
-    except (httpx.HTTPError, KeyError, IndexError):
+    except (httpx.HTTPError, KeyError, IndexError, ValueError):
         return None
     return None
 
 
 def fetch_image(query: str, job_dir: Path, prefer: str = "pexels") -> tuple[str | None, str]:
     """(path, source). Tries the preferred source, falls back to the other."""
-    order = ["pexels", "gemini"] if prefer == "pexels" else ["gemini", "pexels"]
+    order = ["pexels", "ai"] if prefer != "ai" else ["ai", "pexels"]
     for source in order:
-        path = fetch_pexels(query, job_dir) if source == "pexels" else fetch_gemini(query, job_dir)
+        path = fetch_pexels(query, job_dir) if source == "pexels" else fetch_ai_image(query, job_dir)
         if path:
             return path, source
     return None, "none"

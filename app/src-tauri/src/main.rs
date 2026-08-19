@@ -142,7 +142,7 @@ fn stream_pipeline(app: &AppHandle, program: &str, args: &[String]) {
     let child = quiet_command(program)
         .args(args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn();
     let mut child = match child {
         Ok(c) => c,
@@ -154,16 +154,46 @@ fn stream_pipeline(app: &AppHandle, program: &str, args: &[String]) {
             return;
         }
     };
+    let mut last_result_ok: Option<bool> = None;
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                if value["event"] == "result" {
+                    last_result_ok = value.get("ok").and_then(|v| v.as_bool());
+                }
                 let _ = app.emit("pipeline-event", value);
             }
         }
     }
+    // Capture stderr instead of discarding it: the pipeline's real error is
+    // almost always on stderr (traceback, yt-dlp stderr, model-download
+    // failure). Only a non-zero exit with NO result event needs the raw
+    // tail surfaced — a clean result event already carries the message.
+    let mut stderr_tail: Vec<String> = Vec::new();
+    if let Some(stderr) = child.stderr.take() {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            stderr_tail.push(line);
+            if stderr_tail.len() > 25 {
+                stderr_tail.remove(0);
+            }
+        }
+    }
     if let Ok(status) = child.wait() {
-        if !status.success() {
-            let _ = app.emit("pipeline-event", json!({"event": "exited", "code": status.code()}));
+        if !status.success() && last_result_ok != Some(true) && last_result_ok != Some(false) {
+            // The pipeline died without reporting a result (crash, OOM,
+            // panic). Surface the captured stderr tail — the previous code
+            // sent only "exited unexpectedly" with no detail at all.
+            let detail = stderr_tail.join("\n");
+            let detail = if detail.trim().is_empty() {
+                format!("exit code {}", status.code().unwrap_or(-1))
+            } else {
+                let tail: String = detail.chars().rev().take(3000).collect::<String>().chars().rev().collect();
+                tail
+            };
+            let _ = app.emit(
+                "pipeline-event",
+                json!({"event": "exited", "code": status.code(), "detail": detail}),
+            );
         }
     }
 }
@@ -220,7 +250,11 @@ fn list_job_dirs() -> Result<Vec<Value>, String> {
 }
 
 #[tauri::command]
-fn save_gemini_key(key: String) -> Result<bool, String> {
+fn save_llm_key(kind: String, key: String) -> Result<bool, String> {
+    let kind = kind.trim().to_string();
+    if kind.is_empty() || !kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err("invalid key kind".into());
+    }
     let home = home_dir();
     fs::create_dir_all(&home).map_err(|e| e.to_string())?;
     let path = home.join("secrets.json");
@@ -228,7 +262,7 @@ fn save_gemini_key(key: String) -> Result<bool, String> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| json!({}));
-    current["gemini_api_key"] = json!(key.trim());
+    current[format!("{kind}_api_key")] = json!(key.trim());
     fs::write(&path, serde_json::to_string_pretty(&current).unwrap()).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
@@ -241,13 +275,13 @@ fn save_gemini_key(key: String) -> Result<bool, String> {
 #[tauri::command]
 fn get_setup_state() -> Result<Value, String> {
     let secrets = home_dir().join("secrets.json");
-    let has_key = fs::read_to_string(&secrets)
+    let has_openrouter = fs::read_to_string(&secrets)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .map(|v| v["gemini_api_key"].as_str().map(|k| !k.is_empty()).unwrap_or(false))
+        .map(|v| v["openrouter_api_key"].as_str().map(|k| !k.is_empty()).unwrap_or(false))
         .unwrap_or(false);
     let onboarded = home_dir().join("onboarded").exists();
-    Ok(json!({"has_gemini_key": has_key, "onboarded": onboarded}))
+    Ok(json!({"has_openrouter_key": has_openrouter, "onboarded": onboarded}))
 }
 
 #[tauri::command]
@@ -446,7 +480,7 @@ fn main() {
             resume_job,
             job_results,
             list_job_dirs,
-            save_gemini_key,
+            save_llm_key,
             get_setup_state,
             mark_onboarded,
             check_ollama,

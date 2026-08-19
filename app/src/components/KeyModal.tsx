@@ -39,14 +39,14 @@ export default function KeyModal({ onClose }: Props) {
   const [saved, setSaved] = useState(false)
 
   useEffect(() => {
-    invoke<{ has_gemini_key: boolean }>('get_setup_state').then((s) =>
-      setHasKey(s.has_gemini_key)
+    invoke<{ has_openrouter_key: boolean }>('get_setup_state').then((s) =>
+      setHasKey(s.has_openrouter_key)
     )
   }, [])
 
   async function save() {
     if (!key.trim()) return
-    await invoke('save_gemini_key', { key })
+    await invoke('save_llm_key', { kind: 'openrouter', key })
     setSaved(true)
     setHasKey(true)
   }
@@ -59,14 +59,15 @@ export default function KeyModal({ onClose }: Props) {
           <button className="btn-ghost" onClick={onClose}>close ✕</button>
         </header>
         <p className="ig-intro">
-          Gemini scores your moments at full quality (~<span className="mono">$0.15</span>/hr
-          of source). The key lives in <span className="mono">~/.publikclip/secrets.json</span>,
-          chmod 600, and never goes anywhere but Google.{' '}
+          OpenRouter scores your moments at full quality — bring your own key,
+          pick any model (default GLM-4.5V). The key lives in{' '}
+          <span className="mono">~/.publikclip/secrets.json</span>, chmod 600, and
+          only ever goes to openrouter.ai.{' '}
           {hasKey && <strong>A key is currently saved{saved ? ' — updated ✓' : ''}.</strong>}
         </p>
         <div className="ig-form">
           <input
-            placeholder="AIza… (aistudio.google.com → Get API key)"
+            placeholder="sk-or-v1-… (openrouter.ai/keys)"
             type="password"
             value={key}
             onChange={(e) => setKey(e.target.value)}

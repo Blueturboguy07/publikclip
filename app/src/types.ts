@@ -78,7 +78,7 @@ export interface JobSummary {
 }
 
 export interface SetupState {
-  has_gemini_key: boolean
+  has_openrouter_key: boolean
   onboarded: boolean
 }
 

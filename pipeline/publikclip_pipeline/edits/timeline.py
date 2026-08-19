@@ -28,7 +28,7 @@ MIN_KEEP_RANGE = 0.4       # never emit keep slivers shorter than this
 class Overlay:
     id: str
     query: str
-    source: str = "pexels"          # 'pexels' | 'gemini' | 'upload'
+    source: str = "pexels"          # 'pexels' | 'ai' | 'upload'
     image_path: str = ""
     start: float = 0.0              # OUTPUT-timeline seconds
     end: float = 2.0

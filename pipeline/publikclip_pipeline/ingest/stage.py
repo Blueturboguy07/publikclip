@@ -49,12 +49,22 @@ class IngestStage(Stage):
         heatmap = None
         title = None
         if job.source_type == "url":
-            meta = ytdlp.fetch_meta(job.source, prog)
+            try:
+                meta = ytdlp.fetch_meta(job.source, prog)
+            except ytdlp.YtDlpError as err:
+                # Wrap into StageError so the error surfaces cleanly through
+                # the result event (and the DB record) instead of escaping
+                # as a raw exception that kills the sidecar with a bare
+                # traceback — the "pipeline exited unexpectedly" reports.
+                raise StageError(str(err)) from err
             heatmap = meta.heatmap
             title = meta.title
             media_path = ctx.job_dir / "media.mp4"
             if not media_path.exists():
-                ytdlp.download(job.source, media_path, prog)
+                try:
+                    ytdlp.download(job.source, media_path, prog)
+                except ytdlp.YtDlpError as err:
+                    raise StageError(str(err)) from err
         else:
             media_path = Path(job.source).expanduser().resolve()
             if not media_path.exists():

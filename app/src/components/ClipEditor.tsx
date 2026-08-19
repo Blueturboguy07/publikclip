@@ -589,7 +589,7 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
           <button className="btn-secondary" onClick={() => doSuggest('pexels')} disabled={suggesting}>
             {suggesting ? 'planning…' : '✚ suggest visuals (stock)'}
           </button>
-          <button className="btn-secondary" onClick={() => doSuggest('gemini')} disabled={suggesting}>
+          <button className="btn-secondary" onClick={() => doSuggest('ai')} disabled={suggesting}>
             ✚ suggest (AI-generated)
           </button>
         </div>

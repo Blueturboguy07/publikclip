@@ -80,7 +80,7 @@ class Settings:
     camera: CameraSettings = field(default_factory=CameraSettings)
     lufs_target: float = -14.0  # decision #8: configurable per destination
     true_peak_db: float = -1.0
-    llm_mode: str = "gemini"  # 'gemini' (BYO key) | 'ollama' (local fallback)
+    llm_mode: str = "auto"  # 'auto' (bedrock→gateway→openrouter) | 'bedrock' | 'gateway' | 'openrouter' | 'ollama'
     caption_preset: str = "classic"
     # jrgillick laughter specialist: 10 ms precision but ~300k CPU forward
     # passes on an hour-plus source. OFF by default — PANNs' AudioSet
@@ -105,7 +105,7 @@ class Settings:
             camera=cam,
             lufs_target=data.get("lufs_target", -14.0),
             true_peak_db=data.get("true_peak_db", -1.0),
-            llm_mode=data.get("llm_mode", "gemini"),
+            llm_mode=data.get("llm_mode", "auto"),
             caption_preset=data.get("caption_preset", "classic"),
             laughter_specialist=data.get("laughter_specialist", False),
         )

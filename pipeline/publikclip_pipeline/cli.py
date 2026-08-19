@@ -108,6 +108,14 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
     except queue.StageError as err:
         _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": str(err)})
         return 1
+    except Exception as err:  # noqa: BLE001 — a crash must still emit a result event
+        # A non-StageError failure (YtDlpError, model-download error, OOM,
+        # missing artifact, …) used to escape to the top level: the sidecar
+        # died with a bare traceback, the desktop shell saw only a non-zero
+        # exit and showed "The pipeline exited unexpectedly" — the real
+        # error never reached the user. Emit it here so the app can show it.
+        _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": repr(err)})
+        return 1
     summary = {
         "ok": True,
         "job_id": job.id,
@@ -284,14 +292,14 @@ def main(argv: list[str] | None = None) -> int:
 
     p_run = sub.add_parser("run", help="process a YouTube URL or local video file")
     p_run.add_argument("source")
-    p_run.add_argument("--llm", choices=["gemini", "ollama"], default=None)
+    p_run.add_argument("--llm", choices=["auto", "bedrock", "gateway", "openrouter", "ollama"], default=None)
     p_run.add_argument("--captions", default=None, help="caption preset name")
     p_run.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
     p_run.set_defaults(fn=cmd_run)
 
     p_resume = sub.add_parser("resume", help="resume a job from its checkpoints")
     p_resume.add_argument("job_id")
-    p_resume.add_argument("--llm", choices=["gemini", "ollama"], default=None)
+    p_resume.add_argument("--llm", choices=["auto", "bedrock", "gateway", "openrouter", "ollama"], default=None)
     p_resume.add_argument("--captions", default=None, help="caption preset name")
     p_resume.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
     p_resume.set_defaults(fn=cmd_resume)
@@ -307,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     p_sv = edit_sub.add_parser("suggest-visuals")
     p_sv.add_argument("job_id")
     p_sv.add_argument("clip", type=int)
-    p_sv.add_argument("--prefer", choices=["pexels", "gemini"], default="pexels")
+    p_sv.add_argument("--prefer", choices=["pexels", "ai"], default="pexels")
     p_rcl = edit_sub.add_parser("render-clip")
     p_rcl.add_argument("job_id")
     p_rcl.add_argument("clip", type=int)

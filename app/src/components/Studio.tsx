@@ -32,7 +32,7 @@ interface Props {
 
 export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop, onOpenJob, onResume }: Props) {
   const [source, setSource] = useState('')
-  const [llm, setLlm] = useState('gemini')
+  const [llm, setLlm] = useState('openrouter')
   const [captions, setCaptions] = useState('classic')
   const [showKey, setShowKey] = useState(false)
 
@@ -64,7 +64,7 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
         </div>
         <footer className="rail-foot">
           <button className="btn-ghost" onClick={() => setShowKey(true)}>
-            ◈ gemini key
+            ◈ openrouter key
           </button>
           <button className="btn-ghost" onClick={onOpenLoop}>
             ⟳ instagram loop
@@ -96,7 +96,7 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
           <div className="run-options">
             <div className="opt-group">
               <span className="opt-label">brain</span>
-              {['gemini', 'ollama'].map((mode) => (
+              {['openrouter', 'ollama'].map((mode) => (
                 <button
                   key={mode}
                   className={`opt ${llm === mode ? 'opt-on' : ''}`}

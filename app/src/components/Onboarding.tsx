@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 
 /**
- * Three beats: what this is → pick the brain (Gemini key or local Ollama) →
+ * Three beats: what this is → pick the brain (OpenRouter key or local Ollama) →
  * go. The optional Instagram feedback module gets its own guided flow later
  * (Settings → Connect Instagram), so first-run stays under a minute.
  */
@@ -23,7 +23,7 @@ export default function Onboarding({ onDone }: Props) {
 
   async function saveKey() {
     if (!key.trim()) return
-    await api.saveGeminiKey(key)
+    await api.saveLlmKey('openrouter', key)
     setSaved(true)
   }
 
@@ -57,16 +57,15 @@ export default function Onboarding({ onDone }: Props) {
           <h2 className="ob-h2">Pick how moments get judged</h2>
           <div className="ob-cards">
             <div className={`ob-card ${saved ? 'done' : ''}`}>
-              <h3>Gemini key <span className="chip chip-amber">recommended</span></h3>
+              <h3>OpenRouter key <span className="chip chip-amber">recommended</span></h3>
               <p>
-                Bring your own key (aistudio.google.com). Costs roughly{' '}
-                <span className="mono">$0.15</span> per hour of source video. Best
-                humor and shock judgment.
+                Bring your own key (openrouter.ai/keys). Pick any model — the
+                default is GLM-4.5V. Best humor and shock judgment.
               </p>
               <div className="ob-key-row">
                 <input
                   type="password"
-                  placeholder="AIza…"
+                  placeholder="sk-or-v1-…"
                   value={key}
                   onChange={(e) => setKey(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && saveKey()}
