@@ -277,6 +277,103 @@ def cmd_ig(args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_audio(args: argparse.Namespace) -> int:
+    """Local music/SFX library — local import + CC-licensed online sources.
+    import/remove/tag/fetch are always JSON (edit_tool's convention);
+    list/search default to human-readable lines, --json switches them
+    over for the app."""
+    from dataclasses import asdict
+
+    from .audio_library import library
+    from .audio_library.sources import MissingKeyError
+    from .audio_library.sources.registry import SOURCES
+
+    if args.audio_cmd == "import":
+        items = library.import_paths(args.paths, kind=args.kind)
+        print(json.dumps({"ok": True, "items": [i.to_json() for i in items]}))
+        return 0
+
+    if args.audio_cmd == "list":
+        items = library.list_items(kind=args.kind, query=args.query)
+        if args.json:
+            print(json.dumps({"ok": True, "items": [i.to_json() for i in items]}))
+        else:
+            for i in items:
+                bpm = f"{i.bpm:.0f}bpm" if i.bpm else "-"
+                print(
+                    f"{i.id}  {i.kind:<5} {i.duration:6.1f}s {bpm:>7}  "
+                    f"{i.licence or 'local':<10} {i.name}  [{', '.join(i.tags)}]"
+                )
+        return 0
+
+    if args.audio_cmd == "remove":
+        removed = library.remove_item(args.item_id)
+        print(json.dumps({"ok": removed}))
+        return 0 if removed else 2
+
+    if args.audio_cmd == "tag":
+        item = library.update_tags(args.item_id, args.tags)
+        if item is None:
+            print(json.dumps({"ok": False, "error": f"no item {args.item_id}"}))
+            return 2
+        print(json.dumps({"ok": True, "item": item.to_json()}))
+        return 0
+
+    if args.audio_cmd == "search":
+        source_names = list(SOURCES) if args.source == "all" else [args.source]
+        max_duration = args.max_duration
+        # Freesound has no sound-effect facet to filter on server-side — a
+        # short default cap keeps --kind sfx results actually sfx-shaped.
+        if max_duration is None and args.kind == "sfx":
+            max_duration = 20.0
+        results = []
+        errors = []
+        for name in source_names:
+            try:
+                results.extend(
+                    SOURCES[name].search(
+                        args.query, kind=args.kind,
+                        max_duration=max_duration, allow_attribution=args.allow_attribution,
+                    )
+                )
+            except MissingKeyError as err:
+                errors.append(str(err))
+        if errors and not results:
+            message = "; ".join(errors)
+            if args.json:
+                print(json.dumps({"ok": False, "error": message}))
+            else:
+                print(message, file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps({"ok": True, "results": [asdict(r) for r in results]}))
+        else:
+            for r in results:
+                print(
+                    f"{r.source:<9} {r.source_id:<10} {r.duration:6.1f}s  "
+                    f"{r.licence:<10} {r.name}  ({r.attribution})"
+                )
+        return 0
+
+    if args.audio_cmd == "fetch":
+        mod = SOURCES.get(args.source)
+        if mod is None:
+            print(json.dumps({"ok": False, "error": f"unknown source {args.source!r}"}))
+            return 2
+        try:
+            result = mod.get(args.source_id)
+        except MissingKeyError as err:
+            print(json.dumps({"ok": False, "error": str(err)}))
+            return 2
+        if result is None:
+            print(json.dumps({"ok": False, "error": f"{args.source} {args.source_id} not found, or its licence isn't CC0/CC-BY"}))
+            return 2
+        item = mod.download(result)
+        print(json.dumps({"ok": True, "item": item.to_json()}))
+        return 0
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="publikclip")
     parser.add_argument("--jsonl", action="store_true", help="machine-readable progress on stdout")
@@ -336,6 +433,39 @@ def main(argv: list[str] | None = None) -> int:
     p_report = ig_sub.add_parser("report", help="score-vs-outcome calibration report")
     p_report.add_argument("--metric", default="views")
     p_ig.set_defaults(fn=cmd_ig)
+
+    p_audio = sub.add_parser("audio", help="local music/SFX library")
+    audio_sub = p_audio.add_subparsers(dest="audio_cmd", required=True)
+
+    p_a_import = audio_sub.add_parser("import", help="import local files or folders")
+    p_a_import.add_argument("paths", nargs="+")
+    p_a_import.add_argument("--kind", choices=["auto", "music", "sfx"], default="auto")
+
+    p_a_list = audio_sub.add_parser("list", help="list library items")
+    p_a_list.add_argument("--kind", choices=["music", "sfx"], default=None)
+    p_a_list.add_argument("--query", default=None)
+    p_a_list.add_argument("--json", action="store_true")
+
+    p_a_remove = audio_sub.add_parser("remove", help="remove a library item")
+    p_a_remove.add_argument("item_id")
+
+    p_a_tag = audio_sub.add_parser("tag", help="set an item's tags")
+    p_a_tag.add_argument("item_id")
+    p_a_tag.add_argument("tags", nargs="+")
+
+    p_a_search = audio_sub.add_parser("search", help="search CC-licensed online sources")
+    p_a_search.add_argument("query")
+    p_a_search.add_argument("--source", choices=["freesound", "jamendo", "all"], default="all")
+    p_a_search.add_argument("--kind", choices=["music", "sfx"], default="music")
+    p_a_search.add_argument("--max-duration", type=float, default=None)
+    p_a_search.add_argument("--allow-attribution", action="store_true")
+    p_a_search.add_argument("--json", action="store_true")
+
+    p_a_fetch = audio_sub.add_parser("fetch", help="download one known online item by id")
+    p_a_fetch.add_argument("source", choices=["freesound", "jamendo"])
+    p_a_fetch.add_argument("source_id")
+
+    p_audio.set_defaults(fn=cmd_audio)
 
     args = parser.parse_args(argv)
     return args.fn(args)
