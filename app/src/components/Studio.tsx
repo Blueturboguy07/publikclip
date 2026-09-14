@@ -64,7 +64,7 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
         </div>
         <footer className="rail-foot">
           <button className="btn-ghost" onClick={() => setShowKey(true)}>
-            ◈ gemini key
+            ◈ api keys
           </button>
           <button className="btn-ghost" onClick={onOpenLoop}>
             ⟳ instagram loop
