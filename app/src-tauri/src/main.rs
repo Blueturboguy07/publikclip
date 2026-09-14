@@ -154,17 +154,51 @@ fn stream_pipeline(app: &AppHandle, program: &str, args: &[String]) {
             return;
         }
     };
+    let mut saw_result = false;
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                if value.get("event").and_then(Value::as_str) == Some("result") {
+                    saw_result = true;
+                }
                 let _ = app.emit("pipeline-event", value);
             }
         }
     }
     if let Ok(status) = child.wait() {
-        if !status.success() {
+        // The CLI emits a structured `result` event before returning nonzero
+        // for an expected stage failure. Emitting `exited` as well races the
+        // frontend listener and replaces the useful stage error with the
+        // generic "exited unexpectedly" banner. Reserve `exited` for a
+        // sidecar that died before it could report a result (panic, signal,
+        // launch/runtime failure).
+        if should_emit_exited(status.success(), saw_result) {
             let _ = app.emit("pipeline-event", json!({"event": "exited", "code": status.code()}));
         }
+    }
+}
+
+fn should_emit_exited(success: bool, saw_result: bool) -> bool {
+    !success && !saw_result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_emit_exited;
+
+    #[test]
+    fn structured_failure_does_not_become_generic_exit() {
+        assert!(!should_emit_exited(false, true));
+    }
+
+    #[test]
+    fn sidecar_without_result_still_reports_exit() {
+        assert!(should_emit_exited(false, false));
+    }
+
+    #[test]
+    fn successful_sidecar_never_reports_exit() {
+        assert!(!should_emit_exited(true, false));
     }
 }
 
