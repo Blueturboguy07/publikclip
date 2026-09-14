@@ -82,6 +82,59 @@ export interface SetupState {
   onboarded: boolean
 }
 
+/* ---------- music / sfx library ---------- */
+
+export interface LibraryItem {
+  id: string
+  path: string
+  kind: 'music' | 'sfx'
+  name: string
+  duration: number
+  bpm: number | null
+  tags: string[]
+  source: 'local' | 'freesound' | 'jamendo'
+  source_id: string | null
+  source_url: string | null
+  licence: string | null
+  attribution: string | null
+  added_at: string
+}
+
+export interface AudioItem {
+  id: string
+  library_id: string
+  path: string
+  kind: 'music' | 'sfx'
+  start: number
+  duration: number
+  gain_db: number
+  fade_in: number
+  fade_out: number
+  loop: boolean
+  duck: boolean
+  suggested: boolean
+}
+
+export interface OnlineAudioResult {
+  source: 'freesound' | 'jamendo'
+  source_id: string
+  name: string
+  duration: number
+  tags: string[]
+  kind: 'music' | 'sfx'
+  licence: string
+  attribution: string
+  download_url: string
+  page_url: string
+  rating: number
+  downloads: number
+}
+
+export interface AudioKeysStatus {
+  has_freesound_key: boolean
+  has_jamendo_key: boolean
+}
+
 /* ---------- the Instagram loop ---------- */
 
 export interface LoopMetrics {

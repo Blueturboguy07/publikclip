@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { DragEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { api } from '../api'
+import AudioPanel from './AudioPanel'
+import type { AudioItem, LibraryItem } from '../types'
 
 /**
  * The per-clip timeline editor. One horizontal timeline over a ±45s context
@@ -22,6 +25,7 @@ interface EditState {
   caption_preset: string | null; camera_mode: string | null
   remove_dead_space: boolean; disabled_cuts: number[]
   overlays: OverlayItem[]
+  audio: AudioItem[]
 }
 interface EditContext {
   ok: boolean
@@ -63,6 +67,11 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
   const [suggesting, setSuggesting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selectedOverlay, setSelectedOverlay] = useState<string | null>(null)
+  const [selectedAudio, setSelectedAudio] = useState<string | null>(null)
+  const [showLibrary, setShowLibrary] = useState(false)
+  const [suggestingAudio, setSuggestingAudio] = useState(false)
+  const [libraryIndex, setLibraryIndex] = useState<Record<string, LibraryItem>>({})
+  const [audioDropHover, setAudioDropHover] = useState(false)
   const railRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ kind: string; id?: string; edge?: 'l' | 'r' } | null>(null)
   const monitorDragRef = useRef<{ id: string; el: HTMLImageElement } | null>(null)
@@ -90,6 +99,17 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
   }, [jobId, clipIndex])
 
   useEffect(reload, [reload])
+
+  // Library items placed on the track carry only an id/path — keep a
+  // name/tags/bpm lookup so already-placed blocks can show a real label.
+  const reloadLibraryIndex = useCallback(() => {
+    api.audioList().then((r) => {
+      const index: Record<string, LibraryItem> = {}
+      for (const it of r.items) index[it.id] = it
+      setLibraryIndex(index)
+    })
+  }, [])
+  useEffect(reloadLibraryIndex, [reloadLibraryIndex])
 
   useEffect(() => {
     let un: (() => void) | null = null
@@ -283,6 +303,22 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
           })
         })
       }
+      else if (drag.kind === 'audio' && drag.id) {
+        setEdit({
+          ...edit,
+          audio: edit.audio.map((a) => {
+            if (a.id !== drag.id) return a
+            const rel = t - edit.start
+            if (drag.edge === 'l') {
+              const endT = a.start + a.duration
+              const newStart = Math.max(0, Math.min(rel, endT - 0.2))
+              return { ...a, start: newStart, duration: endT - newStart }
+            }
+            if (drag.edge === 'r') return { ...a, duration: Math.max(0.2, rel - a.start) }
+            return { ...a, start: Math.max(0, rel - a.duration / 2) }
+          })
+        })
+      }
     }
     function onMonitorMove(e: MouseEvent) {
       const md = monitorDragRef.current
@@ -346,6 +382,72 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
     } finally {
       setSuggesting(false)
     }
+  }
+
+  // Replaces prior suggested=true items with the fresh batch; anything the
+  // user placed by hand (suggested=false) survives untouched.
+  async function doSuggestAudio() {
+    if (!edit) return
+    setSuggestingAudio(true)
+    setError(null)
+    try {
+      const res = await api.audioSuggest(jobId, clipIndex)
+      if (res.ok) {
+        const kept = edit.audio.filter((a) => !a.suggested)
+        await persist({ ...edit, audio: [...kept, ...res.audio] })
+        reloadLibraryIndex()
+      } else setError(res.error ?? 'no audio suggestions found')
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setSuggestingAudio(false)
+    }
+  }
+
+  function updateAudioItem(id: string, patch: Partial<AudioItem>) {
+    if (!edit) return
+    setEdit({ ...edit, audio: edit.audio.map((a) => (a.id === id ? { ...a, ...patch } : a)) })
+  }
+
+  function acceptSuggestion(id: string) {
+    if (!edit) return
+    persist({ ...edit, audio: edit.audio.map((a) => (a.id === id ? { ...a, suggested: false } : a)) })
+  }
+
+  function deleteAudioItem(id: string) {
+    if (!edit) return
+    if (selectedAudio === id) setSelectedAudio(null)
+    persist({ ...edit, audio: edit.audio.filter((a) => a.id !== id) })
+  }
+
+  function handleAudioDrop(e: DragEvent<HTMLDivElement>) {
+    e.preventDefault()
+    setAudioDropHover(false)
+    if (!edit) return
+    const raw = e.dataTransfer.getData('application/x-publikclip-audio')
+    if (!raw) return
+    let lib: LibraryItem
+    try {
+      lib = JSON.parse(raw)
+    } catch {
+      return
+    }
+    const t = fromClientX(e.clientX) - edit.start
+    const newItem: AudioItem = {
+      id: crypto.randomUUID(),
+      library_id: lib.id,
+      path: lib.path,
+      kind: lib.kind,
+      start: Math.max(0, t),
+      duration: lib.duration,
+      gain_db: lib.kind === 'music' ? -14 : 0,
+      fade_in: 0,
+      fade_out: 0,
+      loop: lib.kind === 'music',
+      duck: lib.kind === 'music',
+      suggested: false
+    }
+    persist({ ...edit, audio: [...edit.audio, newItem] })
   }
 
   if (!ctx || !edit || !win) {
@@ -670,6 +772,140 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
             </div>
           ))}
         </div>
+      )}
+
+      {/* audio track: music/sfx, same interaction model as the overlay track */}
+      <div className="audio-track">
+        <span className="opt-label">audio</span>
+        <div
+          className={`audio-rail ${audioDropHover ? 'audio-rail-drop' : ''}`}
+          onDragOver={(e) => {
+            e.preventDefault()
+            setAudioDropHover(true)
+          }}
+          onDragLeave={() => setAudioDropHover(false)}
+          onDrop={handleAudioDrop}
+        >
+          {edit.audio.map((a) => {
+            const absStart = edit.start + a.start
+            const absEnd = absStart + a.duration
+            const name = libraryIndex[a.library_id]?.name ?? a.library_id.slice(0, 8)
+            return (
+              <div
+                key={a.id}
+                className={`audio-item audio-item-${a.kind} ${a.suggested ? 'audio-item-suggested' : ''} ${
+                  selectedAudio === a.id ? 'ov-on' : ''
+                }`}
+                style={{ left: `${toPx(absStart)}%`, width: `${Math.max(1, toPx(absEnd) - toPx(absStart))}%` }}
+                onMouseDown={() => {
+                  setSelectedAudio(a.id)
+                  dragRef.current = { kind: 'audio', id: a.id }
+                }}
+                title={`${a.kind} · ${name} · ${a.duration.toFixed(1)}s`}
+              >
+                <span
+                  className="ov-edge"
+                  onMouseDown={(e) => {
+                    e.stopPropagation()
+                    dragRef.current = { kind: 'audio', id: a.id, edge: 'l' }
+                  }}
+                />
+                <span className="audio-label">{a.kind === 'music' ? '♪' : '✦'} {name.slice(0, 16)}</span>
+                <span
+                  className="ov-edge ov-edge-r"
+                  onMouseDown={(e) => {
+                    e.stopPropagation()
+                    dragRef.current = { kind: 'audio', id: a.id, edge: 'r' }
+                  }}
+                />
+                {a.suggested && (
+                  <button
+                    className="audio-accept"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      acceptSuggestion(a.id)
+                    }}
+                    title="accept this suggestion"
+                  >
+                    ✓
+                  </button>
+                )}
+              </div>
+            )
+          })}
+        </div>
+        <div className="ov-actions">
+          <button className="btn-secondary" onClick={() => setShowLibrary(true)}>♪ library</button>
+          <button className="btn-secondary" onClick={doSuggestAudio} disabled={suggestingAudio}>
+            {suggestingAudio ? 'planning…' : '✚ suggest audio'}
+          </button>
+        </div>
+      </div>
+
+      {/* selected audio item inspector */}
+      {selectedAudio && edit.audio.find((a) => a.id === selectedAudio) && (
+        (() => {
+          const a = edit.audio.find((x) => x.id === selectedAudio)!
+          const name = libraryIndex[a.library_id]?.name ?? a.library_id
+          return (
+            <div className="audio-inspector">
+              <div className="audio-inspector-row">
+                <span className="mono">{a.kind === 'music' ? '♪' : '✦'} {name}</span>
+                {a.suggested && <span className="mono amber">suggested</span>}
+                <button className="opt audio-delete" onClick={() => deleteAudioItem(a.id)}>✕ remove</button>
+              </div>
+              <div className="audio-inspector-row">
+                <label>gain</label>
+                <input
+                  type="range" min={-40} max={6} step={0.5} value={a.gain_db}
+                  onChange={(e) => updateAudioItem(a.id, { gain_db: Number(e.target.value) })}
+                  onMouseUp={() => persist(editRef.current!)}
+                />
+                <span className="mono">{a.gain_db.toFixed(1)} dB</span>
+              </div>
+              <div className="audio-inspector-row">
+                <label>fade in</label>
+                <input
+                  type="range" min={0} max={3} step={0.1} value={a.fade_in}
+                  onChange={(e) => updateAudioItem(a.id, { fade_in: Number(e.target.value) })}
+                  onMouseUp={() => persist(editRef.current!)}
+                />
+                <span className="mono">{a.fade_in.toFixed(1)}s</span>
+              </div>
+              <div className="audio-inspector-row">
+                <label>fade out</label>
+                <input
+                  type="range" min={0} max={3} step={0.1} value={a.fade_out}
+                  onChange={(e) => updateAudioItem(a.id, { fade_out: Number(e.target.value) })}
+                  onMouseUp={() => persist(editRef.current!)}
+                />
+                <span className="mono">{a.fade_out.toFixed(1)}s</span>
+              </div>
+              <div className="audio-inspector-row">
+                <button
+                  className={`opt ${a.loop ? 'opt-on' : ''}`}
+                  onClick={() => persist({ ...edit, audio: edit.audio.map((x) => (x.id === a.id ? { ...x, loop: !x.loop } : x)) })}
+                >
+                  ↻ loop
+                </button>
+                <button
+                  className={`opt ${a.duck ? 'opt-on' : ''}`}
+                  onClick={() => persist({ ...edit, audio: edit.audio.map((x) => (x.id === a.id ? { ...x, duck: !x.duck } : x)) })}
+                >
+                  ⇩ duck under speech
+                </button>
+              </div>
+            </div>
+          )
+        })()
+      )}
+
+      {showLibrary && (
+        <AudioPanel
+          onClose={() => setShowLibrary(false)}
+          onLibraryChanged={reloadLibraryIndex}
+        />
       )}
     </div>
   )
