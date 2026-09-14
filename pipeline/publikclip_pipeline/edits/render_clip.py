@@ -1,10 +1,12 @@
 """Single-clip render with edits applied: free bounds, dead-space keep-
-ranges, per-clip caption preset + camera mode, and visual overlays.
+ranges, per-clip caption preset + camera mode, visual overlays, and a
+music/sfx audio track.
 
 One ffmpeg graph: split → per-range trim/atrim → concat → sendcmd crop
 (remapped trajectory) → scale → overlays (enable windows, opt-in fade
-animations) → caption burn (remapped words) → loudnorm. Camera re-directs
-only when bounds or camera mode differ from what the run produced.
+animations) → caption burn (remapped words) → audio mix (music/sfx ducked
+under speech) → loudnorm. Camera re-directs only when bounds or camera
+mode differ from what the run produced.
 """
 
 from __future__ import annotations
@@ -14,10 +16,23 @@ import subprocess
 from pathlib import Path
 
 from .. import config
+from ..audio_library import library as audio_lib
 from ..captions import ass as ass_mod
 from ..render import ffmpeg_bin, renderer
 from . import store
-from .timeline import ClipEdit, TimeRemap, detect_dead_space, keep_ranges
+from .timeline import AudioItem, ClipEdit, TimeRemap, detect_dead_space, keep_ranges
+
+# sidechaincompress presets keyed by the clip's music-brief duck_intensity
+# (threshold is LINEAR 0..1 — lower fires on quieter speech; ratio is the
+# standard compression ratio — higher squashes harder once triggered).
+DUCK_PRESETS = {
+    "light": {"threshold": 0.5, "ratio": 2.0},
+    "medium": {"threshold": 0.25, "ratio": 4.0},
+    "heavy": {"threshold": 0.1, "ratio": 8.0},
+}
+# aloop's `size` (max samples to buffer+loop) is capped at INT_MAX; this is
+# safely under that and far more samples than any realistic music/sfx file.
+ALOOP_MAX_SIZE = 2_000_000_000
 
 
 def _load_stage(job_dir: Path, stage: str) -> dict:
@@ -133,8 +148,9 @@ def _trajectory_for(job_dir: Path, clip_idx: int, edit: ClipEdit, score_clip: di
     return {"fps": traj.fps, "frames": traj.frames, "cuts": traj.cuts, "punches": traj.punches}
 
 
-def _overlay_filters(overlays, input_offset: int, out_w: int, out_h: int) -> tuple[list[str], list[str], str]:
-    """(extra -i args, filter chains, final label). Base video label [vb]."""
+def _overlay_filters(overlays, input_offset: int, out_w: int, out_h: int) -> tuple[list[str], list[str], str, int]:
+    """(extra -i args, filter chains, final label, count of -i inputs added).
+    Base video label [vb]."""
     inputs: list[str] = []
     chains: list[str] = []
     label = "vb"
@@ -165,7 +181,107 @@ def _overlay_filters(overlays, input_offset: int, out_w: int, out_h: int) -> tup
             f"[{label}][ov{k}]overlay=x='{x}':y='{y}':enable='between(t,{ov.start:.2f},{ov.end:.2f})'[{nxt}]"
         )
         label = nxt
-    return inputs, chains, label
+    return inputs, chains, label, added
+
+
+def _needs_loop(item: AudioItem, lib_index: dict) -> bool:
+    """Whether to apply aloop: the item wants looping AND its source file
+    (looked up by library_id) is actually shorter than the placement. An
+    item whose library entry vanished (removed from the library after
+    being placed) loops anyway — safe default, never leaves silence."""
+    if not item.loop:
+        return False
+    src = lib_index.get(item.library_id)
+    return src is None or src.duration < item.duration
+
+
+def _audio_mix_filters(
+    audio_items: list[AudioItem],
+    duck_intensity: str,
+    input_offset: int,
+    lib_index: dict,
+) -> tuple[list[str], list[str], str]:
+    """(extra -i args, filter chains, label to feed loudnorm instead of
+    [ac]). Empty audio_items returns ([], [], "ac") — the graph is then
+    byte-identical to the no-audio-track path."""
+    if not audio_items:
+        return [], [], "ac"
+
+    inputs: list[str] = []
+    chains: list[str] = []
+    preset = DUCK_PRESETS.get(duck_intensity, DUCK_PRESETS["medium"])
+    duck_count = sum(1 for item in audio_items if item.duck)
+
+    # The normalized speech stream is consumed by amix AND, once per ducked
+    # item, as a sidechaincompress key. Referencing one [ac_fmt] label from
+    # multiple filters lets ffmpeg's format auto-negotiation silently pick a
+    # DIFFERENT format for it (observed: reverts to the source's native rate/
+    # mono instead of the requested 48k stereo) — asplit gives every consumer
+    # its own copy of the already-formatted stream so none of them renegotiate.
+    if duck_count:
+        split_labels = ["ac_fmt"] + [f"ac_sc{i}" for i in range(duck_count)]
+        chains.append(
+            "[ac]aformat=sample_rates=48000:channel_layouts=stereo,"
+            f"asplit={len(split_labels)}" + "".join(f"[{lbl}]" for lbl in split_labels)
+        )
+        sidechain_labels = iter(split_labels[1:])
+    else:
+        chains.append("[ac]aformat=sample_rates=48000:channel_layouts=stereo[ac_fmt]")
+        sidechain_labels = iter(())
+
+    mix_labels = ["ac_fmt"]
+
+    for k, item in enumerate(audio_items):
+        idx = input_offset + k
+        inputs += ["-i", item.path]
+
+        steps = []
+        if _needs_loop(item, lib_index):
+            steps.append(f"aloop=loop=-1:size={ALOOP_MAX_SIZE}")
+        steps.append(f"atrim=duration={item.duration:.3f}")
+        steps.append("asetpts=PTS-STARTPTS")
+        steps.append(f"volume={item.gain_db:.2f}dB")
+        if item.fade_in > 0:
+            steps.append(f"afade=t=in:st=0:d={item.fade_in:.3f}")
+        if item.fade_out > 0:
+            fade_start = max(0.0, item.duration - item.fade_out)
+            steps.append(f"afade=t=out:st={fade_start:.3f}:d={item.fade_out:.3f}")
+        delay_ms = max(0, round(item.start * 1000))
+        steps.append(f"adelay=delays={delay_ms}:all=1")
+        steps.append("aformat=sample_rates=48000:channel_layouts=stereo")
+
+        label = f"aitem{k}"
+        chains.append(f"[{idx}:a]" + ",".join(steps) + f"[{label}]")
+
+        if item.duck:
+            duck_label = f"{label}d"
+            sc_label = next(sidechain_labels)
+            chains.append(
+                f"[{label}][{sc_label}]sidechaincompress="
+                f"threshold={preset['threshold']}:ratio={preset['ratio']}[{duck_label}]"
+            )
+            mix_labels.append(duck_label)
+        else:
+            mix_labels.append(label)
+
+    mix_in = "".join(f"[{lbl}]" for lbl in mix_labels)
+    chains.append(f"{mix_in}amix=inputs={len(mix_labels)}:duration=first:normalize=0[ac_mixed]")
+    return inputs, chains, "ac_mixed"
+
+
+def _write_credits(out_dir: Path, clip_idx: int, audio_items: list[AudioItem], lib_index: dict) -> None:
+    """credits.txt next to the rendered clip, listing attribution for every
+    CC-BY item used — CC0 and local items need no credit."""
+    lines = []
+    for item in audio_items:
+        src = lib_index.get(item.library_id)
+        if src and src.licence and src.licence.startswith("CC-BY") and src.attribution:
+            lines.append(src.attribution)
+    credits_path = out_dir / f"clip_{clip_idx:02d}.credits.txt"
+    if lines:
+        credits_path.write_text("\n".join(lines) + "\n")
+    else:
+        credits_path.unlink(missing_ok=True)  # stale credits from a prior render
 
 
 def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
@@ -269,14 +385,22 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     )
     graph.append(vchain)
 
-    ov_inputs, ov_chains, vlabel = _overlay_filters(edit.overlays, 1, renderer.OUT_W, renderer.OUT_H)
+    ov_inputs, ov_chains, vlabel, ov_added = _overlay_filters(edit.overlays, 1, renderer.OUT_W, renderer.OUT_H)
     graph.extend(ov_chains)
     if captions_ok:
         graph.append(
             f"[{vlabel}]subtitles=filename={renderer._q(ass_path)}:fontsdir={renderer._q(ass_mod.FONTS_DIR)}[vf]"  # noqa: SLF001
         )
         vlabel = "vf"
-    graph.append(f"[ac]loudnorm=I={settings.lufs_target}:TP={settings.true_peak_db}:LRA=11[af]")
+
+    # --- audio track (music/sfx, ducked under speech) ------------------------
+    lib_index = audio_lib.load_index()
+    duck_intensity = (clip.get("music") or {}).get("duck_intensity") or "medium"
+    audio_inputs, audio_chains, speech_label = _audio_mix_filters(
+        edit.audio, duck_intensity, 1 + ov_added, lib_index
+    )
+    graph.extend(audio_chains)
+    graph.append(f"[{speech_label}]loudnorm=I={settings.lufs_target}:TP={settings.true_peak_db}:LRA=11[af]")
 
     if renderer.videotoolbox_available():
         vcodec = ["-c:v", "h264_videotoolbox", "-b:v", renderer.VT_BITRATE, "-allow_sw", "1"]
@@ -288,6 +412,7 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
         ffmpeg_bin.ffmpeg(), "-y", "-v", "error",
         "-ss", f"{span_a:.3f}", "-t", f"{span_b - span_a:.3f}", "-i", ingest["media_path"],
         *ov_inputs,
+        *audio_inputs,
         "-filter_complex", ";".join(graph),
         "-map", f"[{vlabel}]", "-map", "[af]",
         *vcodec,
@@ -300,6 +425,7 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     cmd_path.unlink(missing_ok=True)
     if proc.returncode != 0:
         raise RuntimeError(f"Clip render failed: {(proc.stderr or '')[-800:]}")
+    _write_credits(out_dir, clip_idx, edit.audio, lib_index)
 
     check = renderer.verify_output(out_path, remap.output_duration)
     entry = {

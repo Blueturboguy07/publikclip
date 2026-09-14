@@ -49,6 +49,38 @@ class Overlay:
 
 
 @dataclass
+class AudioItem:
+    """A music or sfx placement on the clip's audio track — one library
+    item, positioned on the OUTPUT timeline. kind-appropriate defaults
+    (gain/loop/duck) fill in via __post_init__ so callers only need to
+    say kind + start/duration; every field is still overridable."""
+
+    id: str
+    library_id: str          # audio_library.Item.id this came from
+    path: str
+    kind: str                 # "music" | "sfx"
+    start: float               # OUTPUT-timeline seconds
+    duration: float
+    gain_db: float | None = None     # default: -14 music / 0 sfx
+    fade_in: float = 0.0
+    fade_out: float = 0.0
+    loop: bool | None = None          # default: true for music, false for sfx
+    duck: bool | None = None          # default: true for music, false for sfx
+    suggested: bool = False           # placed by auto-suggest, not the user
+
+    def __post_init__(self) -> None:
+        if self.gain_db is None:
+            self.gain_db = -14.0 if self.kind == "music" else 0.0
+        if self.loop is None:
+            self.loop = self.kind == "music"
+        if self.duck is None:
+            self.duck = self.kind == "music"
+
+    def to_json(self) -> dict:
+        return self.__dict__.copy()
+
+
+@dataclass
 class ClipEdit:
     """Per-clip overrides. Absent fields fall back to the run's globals."""
 
@@ -59,15 +91,18 @@ class ClipEdit:
     remove_dead_space: bool = False
     disabled_cuts: list[int] = field(default_factory=list)  # indices into auto cuts
     overlays: list[Overlay] = field(default_factory=list)
+    audio: list[AudioItem] = field(default_factory=list)
 
     def to_json(self) -> dict:
         d = self.__dict__.copy()
         d["overlays"] = [o.to_json() for o in self.overlays]
+        d["audio"] = [a.to_json() for a in self.audio]
         return d
 
     @classmethod
     def from_json(cls, data: dict) -> "ClipEdit":
         overlays = [Overlay(**o) for o in data.get("overlays", [])]
+        audio = [AudioItem(**a) for a in data.get("audio", [])]  # missing key -> []
         return cls(
             start=float(data["start"]),
             end=float(data["end"]),
@@ -76,6 +111,7 @@ class ClipEdit:
             remove_dead_space=bool(data.get("remove_dead_space", False)),
             disabled_cuts=list(data.get("disabled_cuts", [])),
             overlays=overlays,
+            audio=audio,
         )
 
 
