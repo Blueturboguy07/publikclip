@@ -19,7 +19,7 @@ from .. import config
 from ..audio_library import library as audio_lib
 from ..captions import ass as ass_mod
 from ..render import ffmpeg_bin, renderer
-from . import store
+from . import audio_suggest, store
 from .timeline import AudioItem, ClipEdit, TimeRemap, detect_dead_space, keep_ranges
 
 # sidechaincompress presets keyed by the clip's music-brief duck_intensity
@@ -284,6 +284,49 @@ def _write_credits(out_dir: Path, clip_idx: int, audio_items: list[AudioItem], l
         credits_path.unlink(missing_ok=True)  # stale credits from a prior render
 
 
+def _remap_events(events_timeline: list[dict], edit: ClipEdit, remap: TimeRemap) -> list[dict]:
+    """Non-pause events inside the clip's bounds, remapped onto the OUTPUT
+    timeline (dropped entirely if their midpoint falls inside a cut)."""
+    out = []
+    for e in events_timeline:
+        if e["type"] == "pause" or e["end"] <= edit.start or e["start"] >= edit.end:
+            continue
+        mid = (e["start"] + e["end"]) / 2
+        if remap.to_output(mid) is None:
+            continue
+        out.append(
+            {
+                "type": e["type"],
+                "start": remap.to_output_clamped(e["start"]),
+                "end": remap.to_output_clamped(e["end"]),
+            }
+        )
+    return out
+
+
+def suggest_audio_for_clip(job_dir: Path, clip_idx: int) -> list[AudioItem]:
+    """Music + sfx suggestions for one clip (`edit audio-suggest`) — builds
+    the same OUTPUT-timeline events/keep-ranges render_clip_edit uses, then
+    hands them to the pure audio_suggest.suggest(). Does not save."""
+    diarize = _load_stage(job_dir, "diarize")
+    events = _load_stage(job_dir, "events")
+    score = _load_stage(job_dir, "score")
+    clip = score["clips"][clip_idx]
+    edit = store.edit_for_clip(job_dir, clip_idx, clip)
+
+    if edit.remove_dead_space:
+        all_words = [w for seg in diarize["segments"] for w in seg.get("words", [])]
+        cuts = detect_dead_space(all_words, events["timeline"], edit.start, edit.end)
+        ranges = keep_ranges(edit.start, edit.end, cuts, edit.disabled_cuts)
+    else:
+        ranges = [(edit.start, edit.end)]
+    remap = TimeRemap(ranges)
+
+    clip_events_out = _remap_events(events["timeline"], edit, remap)
+    library_items = audio_lib.list_items()
+    return audio_suggest.suggest(clip, library_items, clip_events_out, remap.output_ranges, remap.output_duration)
+
+
 def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     """The per-clip render path. Returns the updated output entry."""
     ingest = _load_stage(job_dir, "ingest")
@@ -340,20 +383,7 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
             cap_words[out_idx].emphasized = w_flagged.emphasized
             out_idx += 1
 
-    clip_events_out = []
-    for e in events["timeline"]:
-        if e["type"] == "pause" or e["end"] <= edit.start or e["start"] >= edit.end:
-            continue
-        mid = (e["start"] + e["end"]) / 2
-        if remap.to_output(mid) is None:
-            continue
-        clip_events_out.append(
-            {
-                "type": e["type"],
-                "start": remap.to_output_clamped(e["start"]),
-                "end": remap.to_output_clamped(e["end"]),
-            }
-        )
+    clip_events_out = _remap_events(events["timeline"], edit, remap)
 
     preset = edit.caption_preset or settings.caption_preset
     captions_ok = ffmpeg_bin.supports_captions()

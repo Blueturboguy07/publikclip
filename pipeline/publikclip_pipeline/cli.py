@@ -181,6 +181,15 @@ def cmd_edit(args: argparse.Namespace) -> int:
             return 1
         _emit_result(args.jsonl, {"ok": True, "output": entry})
         return 0
+
+    if args.edit_cmd == "audio-suggest":
+        try:
+            suggestions = rc.suggest_audio_for_clip(job_dir, args.clip)
+        except Exception as err:  # noqa: BLE001 — surface, don't crash the app
+            print(json.dumps({"ok": False, "error": str(err)}))
+            return 1
+        print(json.dumps({"ok": True, "audio": [a.to_json() for a in suggestions]}))
+        return 0
     return 2
 
 
@@ -408,6 +417,9 @@ def main(argv: list[str] | None = None) -> int:
     p_rcl = edit_sub.add_parser("render-clip")
     p_rcl.add_argument("job_id")
     p_rcl.add_argument("clip", type=int)
+    p_as = edit_sub.add_parser("audio-suggest", help="suggest music/sfx for a clip (prints JSON, does not save)")
+    p_as.add_argument("job_id")
+    p_as.add_argument("clip", type=int)
     p_edit.set_defaults(fn=cmd_edit)
 
     p_ig = sub.add_parser("ig", help="Instagram feedback loop (your own Meta app)")

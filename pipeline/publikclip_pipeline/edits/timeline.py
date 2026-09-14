@@ -207,6 +207,16 @@ class TimeRemap:
             acc += b - a
         self.output_duration = acc
 
+    @property
+    def output_ranges(self) -> list[tuple[float, float]]:
+        """Each keep range's OUTPUT-timeline (start, end) — contiguous, in
+        source-range order. What audio_suggest.suggest()'s keep_ranges
+        param expects (cut boundaries = the seams between these)."""
+        return [
+            (round(off, 3), round(off + (b - a), 3))
+            for (a, b), off in zip(self.ranges, self._offsets)
+        ]
+
     def to_output(self, t: float) -> float | None:
         """None when t falls inside a cut."""
         for (a, b), off in zip(self.ranges, self._offsets):
