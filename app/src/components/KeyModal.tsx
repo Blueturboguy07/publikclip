@@ -33,6 +33,58 @@ function PexelsField() {
   )
 }
 
+function FreesoundField() {
+  const [key, setKey] = useState('')
+  const [saved, setSaved] = useState(false)
+  return (
+    <div className="ig-form">
+      <input
+        placeholder="Freesound API key (free — freesound.org/apiv2/apply)"
+        type="password"
+        value={key}
+        onChange={(e) => setKey(e.target.value)}
+        className="mono"
+      />
+      <button
+        className="btn-secondary"
+        disabled={!key.trim()}
+        onClick={async () => {
+          await invoke('save_freesound_key', { key })
+          setSaved(true)
+        }}
+      >
+        {saved ? 'saved ✓' : 'save'}
+      </button>
+    </div>
+  )
+}
+
+function JamendoField() {
+  const [key, setKey] = useState('')
+  const [saved, setSaved] = useState(false)
+  return (
+    <div className="ig-form">
+      <input
+        placeholder="Jamendo client id (free — devportal.jamendo.com)"
+        type="password"
+        value={key}
+        onChange={(e) => setKey(e.target.value)}
+        className="mono"
+      />
+      <button
+        className="btn-secondary"
+        disabled={!key.trim()}
+        onClick={async () => {
+          await invoke('save_jamendo_key', { key })
+          setSaved(true)
+        }}
+      >
+        {saved ? 'saved ✓' : 'save'}
+      </button>
+    </div>
+  )
+}
+
 export default function KeyModal({ onClose }: Props) {
   const [key, setKey] = useState('')
   const [hasKey, setHasKey] = useState<boolean | null>(null)
@@ -79,6 +131,10 @@ export default function KeyModal({ onClose }: Props) {
         </div>
         <p className="audit-label" style={{ marginTop: 22 }}>PEXELS (STOCK VISUALS)</p>
         <PexelsField />
+        <p className="audit-label" style={{ marginTop: 22 }}>FREESOUND (SOUND EFFECTS)</p>
+        <FreesoundField />
+        <p className="audit-label" style={{ marginTop: 22 }}>JAMENDO (MUSIC)</p>
+        <JamendoField />
         <p className="ig-message mono">
           Applies to new runs; a job mid-flight keeps the brain it started with.
         </p>
