@@ -59,5 +59,6 @@ export const api = {
     invoke<{ ok: boolean; audio: AudioItem[]; error?: string }>('audio_suggest', { jobId, clip }),
   saveFreesoundKey: (key: string) => invoke<boolean>('save_freesound_key', { key }),
   saveJamendoKey: (key: string) => invoke<boolean>('save_jamendo_key', { key }),
-  audioKeysStatus: () => invoke<AudioKeysStatus>('audio_keys_status')
+  audioKeysStatus: () => invoke<AudioKeysStatus>('audio_keys_status'),
+  runAudioBootstrap: () => invoke<void>('run_audio_bootstrap')
 }

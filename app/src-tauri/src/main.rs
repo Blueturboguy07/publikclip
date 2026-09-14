@@ -306,6 +306,22 @@ async fn edit_tool(args: Vec<String>) -> Result<Value, String> {
     run_cli_json(full)
 }
 
+/// Fetches the curated starter pack — can take a while (several downloads),
+/// so it streams progress over the same pipeline-event channel as
+/// run_job/run_edit_render rather than blocking behind a sync call.
+#[tauri::command]
+fn run_audio_bootstrap(app: AppHandle) -> Result<(), String> {
+    let (program, base_args) = pipeline_invocation();
+    std::thread::spawn(move || {
+        let mut args = base_args.clone();
+        args.push("--jsonl".to_string());
+        args.push("audio".to_string());
+        args.push("bootstrap".to_string());
+        stream_pipeline(&app, &program, &args);
+    });
+    Ok(())
+}
+
 #[tauri::command]
 fn run_edit_render(app: AppHandle, job_id: String, clip: u32) -> Result<(), String> {
     let (program, base_args) = pipeline_invocation();
@@ -571,7 +587,8 @@ fn main() {
             audio_remove,
             audio_search,
             audio_fetch,
-            audio_suggest
+            audio_suggest,
+            run_audio_bootstrap
         ])
         .setup(|app| {
             let _ = app.get_webview_window("main");

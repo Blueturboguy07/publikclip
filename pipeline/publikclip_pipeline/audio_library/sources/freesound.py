@@ -23,7 +23,7 @@ from . import MissingKeyError, Result, is_allowed, key_error, parse_cc_licence
 
 API_BASE = "https://freesound.org/apiv2"
 SIGNUP_URL = "https://freesound.org/apiv2/apply/"
-SEARCH_FIELDS = "id,name,duration,tags,license,previews,username"
+SEARCH_FIELDS = "id,name,duration,tags,license,previews,username,avg_rating,num_downloads"
 PAGE_SIZE = 20
 
 
@@ -65,6 +65,8 @@ def _to_result(sound: dict, kind: str) -> Result | None:
         attribution=_attribution(name, username, licence),
         download_url=url,
         page_url=f"https://freesound.org/people/{username}/sounds/{sound['id']}/",
+        rating=float(sound.get("avg_rating") or 0.0),
+        downloads=int(sound.get("num_downloads") or 0),
     )
 
 

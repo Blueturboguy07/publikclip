@@ -380,6 +380,14 @@ def cmd_audio(args: argparse.Namespace) -> int:
         item = mod.download(result)
         print(json.dumps({"ok": True, "item": item.to_json()}))
         return 0
+
+    if args.audio_cmd == "bootstrap":
+        from .audio_library import starter_pack
+
+        emit = _progress_printer(args.jsonl)
+        items = starter_pack.bootstrap(lambda f, m: emit("bootstrap", f, m))
+        _emit_result(args.jsonl, {"ok": True, "items": [i.to_json() for i in items]})
+        return 0
     return 2
 
 
@@ -476,6 +484,8 @@ def main(argv: list[str] | None = None) -> int:
     p_a_fetch = audio_sub.add_parser("fetch", help="download one known online item by id")
     p_a_fetch.add_argument("source", choices=["freesound", "jamendo"])
     p_a_fetch.add_argument("source_id")
+
+    audio_sub.add_parser("bootstrap", help="fetch a curated CC0 starter pack (music + sfx)")
 
     p_audio.set_defaults(fn=cmd_audio)
 

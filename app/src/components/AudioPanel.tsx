@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
+import { listen } from '@tauri-apps/api/event'
 import { api } from '../api'
 import type { AudioKeysStatus, LibraryItem, OnlineAudioResult } from '../types'
 
@@ -40,11 +41,39 @@ export default function AudioPanel({ onClose, onLibraryChanged }: Props) {
   const [kindFilter, setKindFilter] = useState<'' | 'music' | 'sfx'>('')
   const [query, setQuery] = useState('')
   const [importing, setImporting] = useState(false)
+  const [libraryEmpty, setLibraryEmpty] = useState<boolean | null>(null) // unfiltered — for the starter-pack prompt
+  const [bootstrapping, setBootstrapping] = useState(false)
+  const [bootstrapMsg, setBootstrapMsg] = useState('')
 
   function reloadLibrary() {
     api.audioList(kindFilter || undefined, query || undefined).then((r) => setItems(r.items))
+    api.audioList().then((r) => setLibraryEmpty(r.items.length === 0))
   }
   useEffect(reloadLibrary, [kindFilter, query])
+
+  useEffect(() => {
+    let un: (() => void) | null = null
+    listen<{ event: string; stage?: string; fraction?: number; message?: string; ok?: boolean; error?: string }>(
+      'pipeline-event',
+      ({ payload }) => {
+        if (payload.stage !== 'bootstrap') return
+        if (payload.event === 'progress') setBootstrapMsg(payload.message ?? '')
+        if (payload.event === 'result') {
+          setBootstrapping(false)
+          setBootstrapMsg(payload.ok ? 'done ✓' : (payload.error ?? 'failed'))
+          reloadLibrary()
+          onLibraryChanged()
+        }
+      }
+    ).then((u) => (un = u))
+    return () => un?.()
+  }, [])
+
+  async function doBootstrap() {
+    setBootstrapping(true)
+    setBootstrapMsg('starting…')
+    await api.runAudioBootstrap()
+  }
 
   async function doImportFiles() {
     const picked = await open({ multiple: true, directory: false })
@@ -185,8 +214,16 @@ export default function AudioPanel({ onClose, onLibraryChanged }: Props) {
                 ＋ folder
               </button>
             </div>
-            {items.length === 0 && (
-              <p className="lib-empty">no audio yet — import files, or fetch CC-licensed tracks in the Online tab</p>
+            {libraryEmpty === true && (
+              <div className="lib-key-notice">
+                <span>Your library is empty — get a curated CC0 starter pack (music + sfx) to try suggestions right away.</span>
+                <button className="btn-secondary" onClick={doBootstrap} disabled={bootstrapping}>
+                  {bootstrapping ? bootstrapMsg || 'fetching…' : '★ get starter pack'}
+                </button>
+              </div>
+            )}
+            {libraryEmpty === false && items.length === 0 && (
+              <p className="lib-empty">no items match this filter</p>
             )}
             {items.map((it) => {
               const key = `lib:${it.id}`
