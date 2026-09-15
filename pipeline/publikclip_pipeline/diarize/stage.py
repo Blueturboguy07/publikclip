@@ -24,9 +24,16 @@ class DiarizeStage(Stage):
         if not audio_path.exists():
             raise StageError("Analysis audio missing — re-run ingest.")
 
-        import torch
-
-        from . import campplus, cluster
+        try:
+            import torch
+            from . import campplus, cluster
+        except Exception as err:  # noqa: BLE001 - optional Windows diarizer
+            # Speaker labeling is an enhancement, not a prerequisite for
+            # finding clips.  Some Windows environments cannot load the
+            # speechbrain/k2_fsa native extension; keep the ASR transcript and
+            # let downstream stages continue with unlabeled speakers.
+            ctx.emit(1.0, f"Speaker labeling unavailable; continuing ({err})")
+            return {"speakers": 0, "turns": [], "segments": asr["segments"]}
 
         ctx.emit(-1, "Loading speaker model…")
         ckpt = registry.ensure(specs.CAMPPLUS, lambda f, m: ctx.emit(f * 0.2, m))

@@ -180,6 +180,21 @@ def read_checkpoint(job: Job, stage: str, schema_version: int) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _relocate_artifact_paths(value: Any, job_dir: Path) -> Any:
+    """Repair checkpoint paths when PUBLIKCLIP_HOME was moved."""
+    if isinstance(value, dict):
+        return {k: _relocate_artifact_paths(v, job_dir) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_relocate_artifact_paths(v, job_dir) for v in value]
+    if isinstance(value, str):
+        path = Path(value)
+        if not path.exists() and any("publikclip" in part.lower() for part in path.parts):
+            candidate = job_dir / path.name
+            if candidate.exists():
+                return str(candidate)
+    return value
+
+
 def mark_stage(job_id: str, stage: str, status: str, schema_version: int, error: str | None = None) -> None:
     with _connect() as conn:
         conn.execute(
@@ -253,6 +268,8 @@ def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[
     set_job_status(job.id, "running")
     for stage in stages:
         cached = read_checkpoint(job, stage.name, stage.schema_version)
+        if cached is not None:
+            cached = _relocate_artifact_paths(cached, job.dir)
         if cached is not None and stage.artifacts_ok(ctx, cached):
             results[stage.name] = cached
             progress(stage.name, 1.0, "cached")

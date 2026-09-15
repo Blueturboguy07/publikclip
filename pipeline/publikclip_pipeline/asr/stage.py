@@ -35,6 +35,16 @@ def _point_caches_at_home() -> None:
     hf_home.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(hf_home))
     os.environ.setdefault("TORCH_HOME", str(config.models_dir() / "torch"))
+    # TorchCodec/FFmpeg loads native DLLs during ASR initialization on
+    # Windows. Ensure the managed static FFmpeg directory is visible to both
+    # the process loader and child tools before importing torch/whisperx.
+    if os.name == "nt":
+        bin_dir = config.bin_dir()
+        os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+        try:
+            os.add_dll_directory(str(bin_dir))
+        except (AttributeError, OSError):
+            pass
 
 
 class AsrStage(Stage):
