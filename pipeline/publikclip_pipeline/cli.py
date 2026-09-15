@@ -108,6 +108,12 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
     except queue.StageError as err:
         _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": str(err)})
         return 1
+    except Exception as err:  # noqa: BLE001 - convert stage failures to a stable result event
+        # A downloader/model backend may raise its own exception type.  Keep the
+        # sidecar protocol intact so the desktop client can show the real error
+        # and offer resume instead of treating the process as an unexplained exit.
+        _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": str(err)})
+        return 1
     summary = {
         "ok": True,
         "job_id": job.id,
