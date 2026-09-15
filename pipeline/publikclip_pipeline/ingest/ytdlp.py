@@ -28,6 +28,7 @@ from typing import Callable
 import httpx
 
 from .. import config
+from ..render import ffmpeg_bin
 
 ProgressFn = Callable[[float, str], None]  # (fraction 0..1 or -1, message)
 
@@ -243,9 +244,20 @@ _PCT_RE = re.compile(r"\[download\]\s+([\d.]+)%")
 
 def download(url: str, out_path: Path, progress: ProgressFn) -> None:
     bin_path = ensure_ytdlp(progress)
-    ffmpeg = shutil.which("ffmpeg")
+    # Provision the bundled static FFmpeg before selecting formats.  YouTube
+    # commonly exposes only split video/audio streams; a PATH-only check makes
+    # a clean Windows install download orphaned files and fail later.
+    ffmpeg_bin.ensure_capable(progress)
+    resolved_ffmpeg = ffmpeg_bin.ffmpeg()
+    ffmpeg = resolved_ffmpeg if Path(resolved_ffmpeg).exists() else None
+    # The Windows bundle does not require a system FFmpeg.  Without it,
+    # requesting separate video+audio streams leaves orphaned files that look
+    # like a successful yt-dlp run but cannot be consumed by the pipeline.
+    # Prefer a progressive MP4 in that case; retain the higher-quality merged
+    # selection when FFmpeg is available.
+    format_spec = DOWNLOAD_FORMAT if ffmpeg else f"b[height<={config.MAX_HEIGHT}][ext=mp4]/b"
     args = [
-        "-f", DOWNLOAD_FORMAT,
+        "-f", format_spec,
         "--merge-output-format", "mp4",
         "--no-playlist",
         "--no-warnings",
