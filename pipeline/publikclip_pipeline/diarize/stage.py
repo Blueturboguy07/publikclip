@@ -35,10 +35,14 @@ class DiarizeStage(Stage):
             ctx.emit(1.0, f"Speaker labeling unavailable; continuing ({err})")
             return {"speakers": 0, "turns": [], "segments": asr["segments"]}
 
-        ctx.emit(-1, "Loading speaker model…")
-        ckpt = registry.ensure(specs.CAMPPLUS, lambda f, m: ctx.emit(f * 0.2, m))
-        device = torch.device("cpu")
-        model = campplus.load_model(str(ckpt), device)
+        try:
+            ctx.emit(-1, "Loading speaker model…")
+            ckpt = registry.ensure(specs.CAMPPLUS, lambda f, m: ctx.emit(f * 0.2, m))
+            device = torch.device("cpu")
+            model = campplus.load_model(str(ckpt), device)
+        except Exception as err:  # noqa: BLE001 - optional Windows diarizer
+            ctx.emit(1.0, f"Speaker labeling unavailable; continuing ({err})")
+            return {"speakers": 0, "turns": [], "segments": asr["segments"]}
 
         import librosa
 
