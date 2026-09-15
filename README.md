@@ -36,6 +36,21 @@ validated on every push by the `windows` workflow: env resolve, full test
 suite, NSIS build, silent install, and a launch of the installed app on a
 clean VM.
 
+## Windows installer
+
+For a normal end-user install, download
+[`publikclip_0.1.0_x64-setup.exe`](release/publikclip_0.1.0_x64-setup.exe), run
+it, and launch Publikclip from the Start menu. This installer was produced by
+the passing Windows CI build (pipeline tests, NSIS install, and a 15-second
+launch smoke check). You do not need to uninstall an older version first; the
+installer upgrades the existing Publikclip installation. The installer is
+currently unsigned, so Windows SmartScreen may require **More info → Run
+anyway** after you verify the checksum:
+
+```
+SHA-256 03F37E162E30C5AE183C3038DADD87A4EF84ACF91F2E5F27CC81FBC70EA71193
+```
+
 ## Layout
 
 ```
