@@ -8,9 +8,11 @@ Everything lives under PUBLIKCLIP_HOME (default ~/.publikclip):
       models/             downloaded model weights
       jobs/<job_id>/      per-job artifacts (media, audio, stage checkpoints)
 
-The desktop app points PUBLIKCLIP_HOME at its own app-data dir; the CLI uses
-the default. Artifacts on disk are the source of truth — the DB only records
-what should exist so a stage can decide whether to skip itself on resume.
+The desktop app and the CLI share this directory: the app only reads
+PUBLIKCLIP_HOME if something else already set it, and spawns the pipeline with
+no env override, so both resolve to the same default. Artifacts on disk are the
+source of truth — the DB only records what should exist so a stage can decide
+whether to skip itself on resume.
 """
 
 from __future__ import annotations
