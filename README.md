@@ -30,6 +30,8 @@ out, validated on real footage. The Instagram feedback loop ships in-app
 (sync, clip↔Reel matching, snapshot history, automatic score calibration).
 Builds are currently unsigned — install from source below, or follow the
 guided install at [publikhq.com/publikclip](https://publikhq.com/publikclip).
+Scoring runs on publik API by default (no key to paste); your own Gemini key
+and a local Ollama model are both one tap away.
 
 Runs on macOS (Apple silicon) and Windows 10/11 x64. The Windows path is
 validated on every push by the `windows` workflow: env resolve, full test
@@ -59,8 +61,34 @@ open /Applications/publikclip.app
 
 The app downloads its speech/audio models (~4–5 GB) on first run with a
 progress UI, and fetches a caption-capable static ffmpeg automatically if the
-machine has none. Scoring uses your own Gemini API key, or a local Ollama
-model at reduced scoring quality — onboarding walks through both.
+machine has none. Scoring runs on publik API by default; your own Gemini API
+key or a local Ollama model (reduced scoring quality) are one tap away in
+onboarding.
+
+### Scoring on publik API
+
+publik API is preselected in onboarding. Tapping **Continue with publik API**
+sets this computer up — no account, no key to paste — and the card that
+appears then shows the free starter balance, one sentence on why the calls
+cost anything, and a button to link the computer to a publik account and pick
+a plan. Nothing is sent to publik before that tap, and nothing is ever charged
+without it showing on the card and on
+[publikhq.com/dashboard/api](https://publikhq.com/dashboard/api).
+
+The key that provisioning returns lives beside the others, in
+`~/.publikclip/secrets.json` (chmod 600), under `"publik"`. Your own Gemini key
+and your Pexels key are never touched by it. `PUBLIK_API_KEY` and
+`PUBLIK_API_BASE_URL` override the file for a single run.
+
+**Building from source with a publik token.**
+`app/src-tauri/publik-app-token.txt` ships a placeholder
+(`pat_publikclip_REPLACE_ME`). A build carrying the placeholder never posts
+anything: the publik card says "Not available in this build" and onboarding
+falls through to the own-key card. To build one that can provision, put the
+public `pat_publikclip_…` token in that file (or set `PUBLIK_APP_TOKEN` in the
+build environment) before `npx tauri build`. The token is public by design —
+it authorises minting one capped, install-bound key attributed to publikclip,
+which is exactly what the app does with it.
 
 ## Install from source (Windows)
 

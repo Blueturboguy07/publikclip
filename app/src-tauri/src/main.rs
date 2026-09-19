@@ -11,7 +11,9 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
-fn home_dir() -> PathBuf {
+mod publik;
+
+pub(crate) fn home_dir() -> PathBuf {
     if let Ok(custom) = std::env::var("PUBLIKCLIP_HOME") {
         return PathBuf::from(custom);
     }
@@ -29,7 +31,7 @@ fn dirs_home() -> PathBuf {
 /// Command that never flashes a console window on Windows (CREATE_NO_WINDOW).
 /// Every pipeline/tool spawn goes through this — a GUI app popping cmd.exe
 /// windows for each sidecar call reads as malware to most people.
-fn quiet_command(program: &str) -> Command {
+pub(crate) fn quiet_command(program: &str) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(program);
     #[cfg(target_os = "windows")]
@@ -342,6 +344,13 @@ fn save_pexels_key(key: String) -> Result<bool, String> {
         .unwrap_or_else(|| json!({}));
     current["pexels_api_key"] = json!(key.trim());
     fs::write(&path, serde_json::to_string_pretty(&current).unwrap()).map_err(|e| e.to_string())?;
+    // secrets.json now holds the publik key as well as the Gemini one, and a
+    // Pexels-first user used to get the umask default on it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
     Ok(true)
 }
 
@@ -457,6 +466,9 @@ fn main() {
             run_edit_render,
             save_clip_edits,
             save_pexels_key,
+            publik::publik_provision,
+            publik::publik_status,
+            publik::publik_disconnect,
             export_clip
         ])
         .setup(|app| {

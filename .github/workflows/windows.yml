@@ -59,6 +59,12 @@ jobs:
           npm ci
           npx tauri build --bundles nsis
 
+      # After the build, deliberately: tauri-build wants app/dist and the
+      # staged src-tauri/resources, and both are produced by the step above.
+      - name: Shell unit tests (publik provisioning shapes)
+        working-directory: app/src-tauri
+        run: cargo test
+
       - name: Install silently and launch the installed app
         shell: pwsh
         run: |

@@ -1,10 +1,18 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import type { PublikStatus } from '../types'
+import PublikCard from './PublikCard'
 
 /**
- * Three beats: what this is → pick the brain (Gemini key or local Ollama) →
- * go. The optional Instagram feedback module gets its own guided flow later
- * (Settings → Connect Instagram), so first-run stays under a minute.
+ * Three beats: what this is → pick the brain (publik API, your own Gemini key,
+ * or local Ollama) → go. The optional Instagram feedback module gets its own
+ * guided flow later (Settings → Connect Instagram), so first-run stays under a
+ * minute.
+ *
+ * publik API is preselected because the shipped default was already a cloud
+ * call — it just used to demand a key first. Nothing is posted to publik until
+ * the person taps "Continue with publik API": that tap is the consent, and the
+ * card that follows it carries the real balance, not a promise of one.
  */
 
 interface Props {
@@ -16,15 +24,31 @@ export default function Onboarding({ onDone }: Props) {
   const [key, setKey] = useState('')
   const [saved, setSaved] = useState(false)
   const [ollama, setOllama] = useState<{ running: boolean; models: string[] } | null>(null)
+  const [publik, setPublik] = useState<PublikStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
 
   useEffect(() => {
     api.checkOllama().then(setOllama).catch(() => setOllama({ running: false, models: [] }))
+    api.publikStatus().then(setPublik).catch(() => setPublik(null))
   }, [])
 
   async function saveKey() {
     if (!key.trim()) return
     await api.saveGeminiKey(key)
     setSaved(true)
+  }
+
+  async function connectPublik() {
+    setBusy(true)
+    setNote(null)
+    try {
+      setPublik(await api.publikProvision())
+    } catch (err) {
+      setNote(String(err))
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -56,12 +80,18 @@ export default function Onboarding({ onDone }: Props) {
           <p className="ob-kicker">01 / the scoring brain</p>
           <h2 className="ob-h2">Pick how moments get judged</h2>
           <div className="ob-cards">
+            <PublikCard
+              status={publik}
+              busy={busy}
+              note={note}
+              onConnect={connectPublik}
+              variant="onboarding"
+            />
             <div className={`ob-card ${saved ? 'done' : ''}`}>
-              <h3>Gemini key <span className="chip chip-amber">recommended</span></h3>
+              <h3>My own Gemini key</h3>
               <p>
-                Bring your own key (aistudio.google.com). Costs roughly{' '}
-                <span className="mono">$0.15</span> per hour of source video. Best
-                humor and shock judgment.
+                Prefer your own Google key? Paste it here (aistudio.google.com) and
+                publikclip talks to Google directly — same scoring quality, your own bill.
               </p>
               <div className="ob-key-row">
                 <input
@@ -96,7 +126,7 @@ export default function Onboarding({ onDone }: Props) {
           <button
             className="btn-primary"
             onClick={() => setStep(2)}
-            disabled={!saved && !ollama?.running}
+            disabled={!publik?.provisioned && !saved && !ollama?.running}
           >
             Continue
           </button>

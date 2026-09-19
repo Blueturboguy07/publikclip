@@ -1,10 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { api } from '../api'
+import type { PublikStatus } from '../types'
+import PublikCard from './PublikCard'
 
 /** Post-onboarding key management — the onboarding-only input was a gap. */
 
 interface Props {
   onClose: () => void
+  onPublikChange?: () => void
 }
 
 function PexelsField() {
@@ -33,22 +37,60 @@ function PexelsField() {
   )
 }
 
-export default function KeyModal({ onClose }: Props) {
+export default function KeyModal({ onClose, onPublikChange }: Props) {
   const [key, setKey] = useState('')
   const [hasKey, setHasKey] = useState<boolean | null>(null)
   const [saved, setSaved] = useState(false)
+  const [publik, setPublik] = useState<PublikStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
+
+  const refreshPublik = useCallback(() => {
+    api
+      .publikStatus()
+      .then((s) => {
+        setPublik(s)
+        onPublikChange?.()
+      })
+      .catch(() => setPublik(null))
+  }, [onPublikChange])
 
   useEffect(() => {
-    invoke<{ has_gemini_key: boolean }>('get_setup_state').then((s) =>
-      setHasKey(s.has_gemini_key)
-    )
-  }, [])
+    invoke<{ has_gemini_key: boolean }>('get_setup_state').then((s) => setHasKey(s.has_gemini_key))
+    refreshPublik()
+  }, [refreshPublik])
 
   async function save() {
     if (!key.trim()) return
     await invoke('save_gemini_key', { key })
     setSaved(true)
     setHasKey(true)
+  }
+
+  async function connect() {
+    setBusy(true)
+    setNote(null)
+    try {
+      setPublik(await api.publikProvision())
+      onPublikChange?.()
+    } catch (err) {
+      setNote(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function disconnect() {
+    setBusy(true)
+    setNote(null)
+    try {
+      await api.publikDisconnect()
+      refreshPublik()
+    } catch (err) {
+      setNote(String(err))
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -58,10 +100,24 @@ export default function KeyModal({ onClose }: Props) {
           <p className="audit-kicker">THE BRAIN</p>
           <button className="btn-ghost" onClick={onClose}>close ✕</button>
         </header>
+
+        {/* publik API first: it is the default, and the plan button has to be
+            reachable from inside the app for as long as this computer is
+            unlinked (publik's contract, section 12.2). */}
+        <PublikCard
+          status={publik}
+          busy={busy}
+          note={note}
+          onConnect={connect}
+          onDisconnect={publik?.provisioned ? disconnect : undefined}
+          variant="settings"
+        />
+
+        <p className="audit-label" style={{ marginTop: 22 }}>MY OWN GEMINI KEY</p>
         <p className="ig-intro">
-          Gemini scores your moments at full quality (~<span className="mono">$0.15</span>/hr
-          of source). The key lives in <span className="mono">~/.publikclip/secrets.json</span>,
-          chmod 600, and never goes anywhere but Google.{' '}
+          Prefer your own Google key? Gemini scores at the same quality; the key lives in{' '}
+          <span className="mono">~/.publikclip/secrets.json</span>, chmod 600, and never goes
+          anywhere but Google.{' '}
           {hasKey && <strong>A key is currently saved{saved ? ' — updated ✓' : ''}.</strong>}
         </p>
         <div className="ig-form">

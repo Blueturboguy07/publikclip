@@ -1,6 +1,9 @@
-import { useState } from 'react'
-import type { JobSummary } from '../types'
+import { useCallback, useEffect, useState } from 'react'
+import { openUrl } from '@tauri-apps/plugin-opener'
+import { api } from '../api'
+import type { JobSummary, PublikStatus } from '../types'
 import KeyModal from './KeyModal'
+import { PublikActions, balanceLine } from './PublikCard'
 
 const STAGE_ORDER = [
   'ingest', 'asr', 'diarize', 'events', 'candidates', 'score', 'camera', 'render'
@@ -19,27 +22,60 @@ const STAGE_LABELS: Record<string, string> = {
 
 const CAPTION_PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop']
 
+/** The value here IS the string run_job forwards as --llm. */
+const BRAINS: Array<[string, string]> = [
+  ['publik', 'publik API'],
+  ['gemini', 'my Gemini key'],
+  ['ollama', 'ollama']
+]
+
 interface Props {
   jobs: JobSummary[]
   running: boolean
   stages: Record<string, { fraction: number; message: string }>
   error: string | null
+  /** Bumped by App whenever a run finishes, so the balance line is never stale. */
+  publikTick?: number
   onRun: (source: string, llm: string, captions: string) => void
   onOpenLoop: () => void
   onOpenJob: (id: string) => void
   onResume: (id: string, llm?: string) => void
 }
 
-export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop, onOpenJob, onResume }: Props) {
+export default function Studio({ jobs, running, stages, error, publikTick, onRun, onOpenLoop, onOpenJob, onResume }: Props) {
   const [source, setSource] = useState('')
-  const [llm, setLlm] = useState('gemini')
+  const [llm, setLlm] = useState('publik')
   const [captions, setCaptions] = useState('classic')
   const [showKey, setShowKey] = useState(false)
+  const [publik, setPublik] = useState<PublikStatus | null>(null)
+
+  const refreshPublik = useCallback(() => {
+    api.publikStatus().then(setPublik).catch(() => setPublik(null))
+  }, [])
+
+  // Re-read on mount and after every finished run: a 402 mid-run has to show
+  // its link the moment the run stops, not on the next launch.
+  useEffect(() => {
+    refreshPublik()
+  }, [refreshPublik, publikTick])
+
+  // The picker starts on whatever this computer is actually set up for.
+  useEffect(() => {
+    if (!publik) return
+    if (publik.provisioned && !publik.status.disconnected) setLlm('publik')
+    else
+      api
+        .setupState()
+        .then((s) => setLlm(s.has_gemini_key ? 'gemini' : 'ollama'))
+        .catch(() => setLlm('gemini'))
+    // Only on the first status read; after that the person owns the choice.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [publik?.provisioned, publik?.status.disconnected])
 
   return (
     <div className="studio">
       <div className="grain" />
-      {showKey && <KeyModal onClose={() => setShowKey(false)} />}
+      {showKey && <KeyModal onClose={() => setShowKey(false)} onPublikChange={refreshPublik} />}
       <aside className="rail">
         <header className="rail-brand">
           <span className="rail-logo">publikclip</span>
@@ -63,8 +99,11 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
           ))}
         </div>
         <footer className="rail-foot">
+          {publik?.provisioned && !publik.status.disconnected && !publik.status.needs_credit && (
+            <p className="rail-empty mono">publik API · {balanceLine(publik)}</p>
+          )}
           <button className="btn-ghost" onClick={() => setShowKey(true)}>
-            ◈ gemini key
+            ◈ brain &amp; keys
           </button>
           <button className="btn-ghost" onClick={onOpenLoop}>
             ⟳ instagram loop
@@ -96,14 +135,14 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
           <div className="run-options">
             <div className="opt-group">
               <span className="opt-label">brain</span>
-              {['gemini', 'ollama'].map((mode) => (
+              {BRAINS.map(([mode, label]) => (
                 <button
                   key={mode}
                   className={`opt ${llm === mode ? 'opt-on' : ''}`}
                   onClick={() => setLlm(mode)}
                   disabled={running}
                 >
-                  {mode}
+                  {label}
                 </button>
               ))}
             </div>
@@ -141,6 +180,42 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
                 </div>
               )
             })}
+          </section>
+        )}
+
+        {publik?.provisioned && publik.status.needs_credit && (
+          <section className="error-block">
+            <span className="led led-err" />
+            <span>
+              publik API needs credit. {balanceLine(publik)}.
+            </span>
+            {/* Exactly one link, and it is the one publik chose for this state. */}
+            <PublikActions status={publik} />
+            <button className="btn-ghost" onClick={() => setShowKey(true)}>
+              Use my own key instead
+            </button>
+          </section>
+        )}
+
+        {publik?.provisioned && publik.status.disconnected && (
+          <section className="error-block">
+            <span className="led led-err" />
+            <span>publik API is disconnected on this computer.</span>
+            <button className="btn-ghost" onClick={() => setShowKey(true)}>
+              Reconnect or use my own key
+            </button>
+          </section>
+        )}
+
+        {!publik?.provisioned && publik?.available === false && (
+          <section className="error-block">
+            <span className="led led-half" />
+            <span>
+              This build carries no publik API token. Paste your own Gemini key, or run Ollama.
+            </span>
+            <button className="btn-ghost" onClick={() => void openUrl('https://publikhq.com/publikclip')}>
+              What is publik API?
+            </button>
           </section>
         )}
 

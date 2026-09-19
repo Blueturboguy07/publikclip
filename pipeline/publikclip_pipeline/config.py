@@ -16,12 +16,38 @@ what should exist so a stage can decide whether to skip itself on resume.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 
 def home_dir() -> Path:
     return Path(os.environ.get("PUBLIKCLIP_HOME", str(Path.home() / ".publikclip")))
+
+
+def publik_shared_file() -> Path:
+    """The per-app credential file publik's convention names, read ONLY here.
+
+    This app's own store stays secrets.json (the convention never asks an app
+    to downgrade its storage); this path exists so that a future writer -- the
+    publik desktop app, an installer -- can drop a credential in the agreed
+    place and publikclip picks it up with no code change.
+    """
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support" / "publik" / "apps"
+    elif os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "publik" / "apps"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "publik" / "apps"
+    return base / "publikclip.json"
+
+
+def publik_status_path() -> Path:
+    """Balance + 402 state, written by the pipeline after every publik call and
+    read by the desktop shell. A file rather than a new JSONL event type: the
+    sidecar event contract is what the whole UI is built on, and a status line
+    is not worth changing it for."""
+    return home_dir() / "publik-status.json"
 
 
 def jobs_dir() -> Path:
@@ -80,7 +106,10 @@ class Settings:
     camera: CameraSettings = field(default_factory=CameraSettings)
     lufs_target: float = -14.0  # decision #8: configurable per destination
     true_peak_db: float = -1.0
-    llm_mode: str = "gemini"  # 'gemini' (BYO key) | 'ollama' (local fallback)
+    # 'publik' (publik API, the default) | 'gemini' (your own Google key) |
+    # 'ollama' (local fallback). Snapshotted per job, so a job started on one
+    # brain finishes and resumes on it.
+    llm_mode: str = "publik"
     caption_preset: str = "classic"
     # jrgillick laughter specialist: 10 ms precision but ~300k CPU forward
     # passes on an hour-plus source. OFF by default — PANNs' AudioSet
@@ -105,7 +134,7 @@ class Settings:
             camera=cam,
             lufs_target=data.get("lufs_target", -14.0),
             true_peak_db=data.get("true_peak_db", -1.0),
-            llm_mode=data.get("llm_mode", "gemini"),
+            llm_mode=data.get("llm_mode", "publik"),
             caption_preset=data.get("caption_preset", "classic"),
             laughter_specialist=data.get("laughter_specialist", False),
         )

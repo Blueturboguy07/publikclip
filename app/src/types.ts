@@ -204,3 +204,32 @@ export interface SyncSummary {
   tombstoned?: number
   fit?: { applied: boolean; version?: number; reason?: string }
 }
+
+/**
+ * What the shell knows about publik API on this computer. Never the key
+ * itself: the UI only ever sees whether one exists and what the last metered
+ * answer said about the balance.
+ */
+export interface PublikStatus {
+  /** A key is on disk and the pipeline will use it. */
+  provisioned: boolean
+  /** This build carries a real app token; false means it cannot provision at all. */
+  available: boolean
+  claim_url: string | null
+  claim_code: string | null
+  status: {
+    balance_micros?: number
+    starter_remaining_micros?: number
+    week_used_micros?: number
+    week_budget_micros?: number | 'none'
+    week_resets_at?: string
+    claim_state?: 'anonymous' | 'claimed'
+    needs_credit?: boolean
+    disconnected?: boolean
+    reprovision?: boolean
+    /** The ONE link a 402 is allowed to render (publik's contract). */
+    top_up_url?: string | null
+    claim_url?: string | null
+    add_credit_url?: string | null
+  }
+}

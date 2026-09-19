@@ -19,6 +19,9 @@ export default function App() {
   const [stages, setStages] = useState<Record<string, { fraction: number; message: string }>>({})
   const [running, setRunning] = useState(false)
   const [runError, setRunError] = useState<string | null>(null)
+  // Bumped whenever a run ends, so Studio re-reads the publik balance and a
+  // 402 mid-run shows its link the moment the run stops.
+  const [publikTick, setPublikTick] = useState(0)
   const unlistenRef = useRef<(() => void) | null>(null)
   const activeJobRef = useRef<string | null>(null)
   activeJobRef.current = activeJob
@@ -67,6 +70,7 @@ export default function App() {
       } else if (payload.event === 'result') {
         setRunning(false)
         refreshJobs()
+        setPublikTick((n) => n + 1)
         if (payload.ok && activeJobRef.current) {
           api.jobResults(activeJobRef.current).then((r) => {
             setResults(r)
@@ -77,6 +81,7 @@ export default function App() {
         }
       } else if (payload.event === 'exited') {
         setRunning(false)
+        setPublikTick((n) => n + 1)
         setRunError('The pipeline exited unexpectedly. Resume the job to continue from its last checkpoint.')
       }
     }).then((un) => {
@@ -152,6 +157,7 @@ export default function App() {
       running={running}
       stages={stages}
       error={runError}
+      publikTick={publikTick}
       onRun={startRun}
       onOpenLoop={() => setView('loop')}
       onOpenJob={openJob}

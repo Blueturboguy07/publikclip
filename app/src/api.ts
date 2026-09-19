@@ -1,5 +1,5 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
-import type { JobResults, JobSummary, LoopOverview, SetupState, SyncSummary } from './types'
+import type { JobResults, JobSummary, LoopOverview, PublikStatus, SetupState, SyncSummary } from './types'
 
 export const api = {
   runJob: (source: string, llm: string, captions: string) =>
@@ -9,6 +9,9 @@ export const api = {
   jobResults: (jobId: string) => invoke<JobResults>('job_results', { jobId }),
   listJobs: () => invoke<JobSummary[]>('list_job_dirs'),
   saveGeminiKey: (key: string) => invoke<boolean>('save_gemini_key', { key }),
+  publikStatus: () => invoke<PublikStatus>('publik_status'),
+  publikProvision: () => invoke<PublikStatus>('publik_provision'),
+  publikDisconnect: () => invoke<void>('publik_disconnect'),
   setupState: () => invoke<SetupState>('get_setup_state'),
   markOnboarded: () => invoke<void>('mark_onboarded'),
   checkOllama: () => invoke<{ running: boolean; models: string[] }>('check_ollama'),
@@ -27,3 +30,10 @@ export const api = {
     invoke<{ ok: boolean }>('ig_tool', { args: ['reject', mediaId, jobId, String(clip)] }),
   fileUrl: (path: string) => convertFileSrc(path)
 }
+
+/** Micro-dollars are how publik counts; people read dollars. */
+export function dollars(micros?: number | null): string {
+  if (micros == null) return ''
+  return `$${(micros / 1_000_000).toFixed(2)}`
+}
+
