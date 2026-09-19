@@ -154,15 +154,30 @@ fn stream_pipeline(app: &AppHandle, program: &str, args: &[String]) {
             return;
         }
     };
+    let mut saw_result = false;
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                if value.get("event").and_then(Value::as_str) == Some("result") {
+                    saw_result = true;
+                }
                 let _ = app.emit("pipeline-event", value);
             }
         }
     }
     if let Ok(status) = child.wait() {
-        if !status.success() {
+        // The pipeline CLI signals a REPORTED failure (bad URL, missing
+        // audio track, ...) via a non-zero exit code too, after already
+        // streaming a final `{"event": "result", "ok": false, ...}` line
+        // with a specific, attributed message — that's not a crash, it's
+        // the CLI doing its job. Only emit the generic, unattributed
+        // "exited" event (which the UI renders as "the pipeline exited
+        // unexpectedly") when the sidecar produced no terminal event at
+        // all, i.e. it actually died mid-flight. Without this check, ANY
+        // reported failure — not just an uncaught crash — got the exact
+        // same generic banner, silently discarding the specific message
+        // `_execute()` had just emitted.
+        if !status.success() && !saw_result {
             let _ = app.emit("pipeline-event", json!({"event": "exited", "code": status.code()}));
         }
     }

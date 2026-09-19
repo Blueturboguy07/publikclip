@@ -49,12 +49,24 @@ class IngestStage(Stage):
         heatmap = None
         title = None
         if job.source_type == "url":
-            meta = ytdlp.fetch_meta(job.source, prog)
-            heatmap = meta.heatmap
-            title = meta.title
-            media_path = ctx.job_dir / "media.mp4"
-            if not media_path.exists():
-                ytdlp.download(job.source, media_path, prog)
+            try:
+                meta = ytdlp.fetch_meta(job.source, prog)
+                heatmap = meta.heatmap
+                title = meta.title
+                media_path = ctx.job_dir / "media.mp4"
+                if not media_path.exists():
+                    ytdlp.download(job.source, media_path, prog)
+            except ytdlp.YtDlpError as err:
+                # Same pattern as the normalize.probe() wrap below: yt-dlp
+                # failures (bad URL, stale extractor, missing ffmpeg for the
+                # merge step, self-update-retry exhausted, watchdog kill...)
+                # already carry a "cleaned, user-facing message" (see
+                # YtDlpError's docstring) but YtDlpError itself is not a
+                # StageError, so left unwrapped it escapes cli.py's
+                # `except queue.StageError` uncaught and crashes the sidecar
+                # with no final result — this re-raises it as the stage
+                # failure type the rest of the pipeline already expects.
+                raise StageError(str(err)) from err
         else:
             media_path = Path(job.source).expanduser().resolve()
             if not media_path.exists():
