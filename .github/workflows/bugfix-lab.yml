@@ -9,14 +9,10 @@ on:
 jobs:
   oracle:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
       - name: Run oracle
         shell: pwsh
-        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bugfix-lab/publikclip-windows-build-cargo-not-found.ps1
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bugfix-lab/publikclip-windows-build-cargo-not-found-single-session.ps1
