@@ -1,0 +1,18 @@
+name: bugfix-lab
+
+on:
+  workflow_dispatch:
+
+jobs:
+  repro:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install uv
+        run: irm https://astral.sh/uv/install.ps1 | iex
+        shell: powershell
+      - name: run cluster repro script
+        shell: pwsh
+        run: |
+          $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+          .\scripts\bugfix-lab\publikclip-pipeline-exit-checkpoint-unknown-stage.ps1
