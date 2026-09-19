@@ -2,6 +2,13 @@ name: bugfix-lab
 
 on:
   workflow_dispatch:
+  # workflow_dispatch requires the workflow file to already be registered on
+  # the default branch, which it isn't yet for this repo (first bugfix-lab
+  # run here) and we never push to main. `push` on the fix branch itself has
+  # no such restriction, so it's the bootstrap trigger for this run.
+  push:
+    branches:
+      - fix/publikclip-pipeline-exit-checkpoint-unknown-stage
 
 jobs:
   repro:
