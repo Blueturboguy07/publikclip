@@ -97,6 +97,18 @@ if (-not $cargoExists) {
     exit 2
 }
 
+# ── Step 1b: the guide's "Install uv" step ──────────────────────────────────
+# prepare-resources.mjs (run by tauri's beforeBuildCommand) shells out to `uv`,
+# so without this the package step fails for an unrelated reason (uv missing)
+# before we can see whether cargo itself resolved. Verbatim guide command.
+Write-Host "== Step 1b: Install uv (guide step 'install-uv') =="
+$installUv = Invoke-FreshShell -WorkingDirectory $repoRoot -Script @'
+winget install --id astral-sh.uv -e --accept-source-agreements --accept-package-agreements
+Write-Host "winget uv install exit: $LASTEXITCODE"
+'@
+Write-Host $installUv.Stdout
+Write-Host $installUv.Stderr
+
 # ── Step 2: the guide's "Install the interface packages" step ──────────────
 Write-Host "== Step 2: npm install (guide step 'dependencies') =="
 $npmInstall = Invoke-FreshShell -WorkingDirectory $appDir -Script @'
