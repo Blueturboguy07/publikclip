@@ -1,0 +1,26 @@
+name: bugfix-lab
+
+on:
+  workflow_dispatch:
+  # workflow_dispatch requires the workflow file to already be registered on
+  # the default branch, which it isn't yet for this repo/branch (first
+  # bugfix-lab run for this cluster) and we never push to main. `push` on
+  # the fix branch itself has no such restriction, so it's the bootstrap
+  # trigger for this run.
+  push:
+    branches:
+      - fix/publikclip-pipeline-exit-ingest-ytdlp
+
+jobs:
+  repro:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install uv
+        run: irm https://astral.sh/uv/install.ps1 | iex
+        shell: powershell
+      - name: run cluster repro script
+        shell: pwsh
+        run: |
+          $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+          .\scripts\bugfix-lab\publikclip-pipeline-exit-ingest-ytdlp.ps1
