@@ -29,16 +29,29 @@ uv pip install --python .venv\Scripts\python.exe -e . --no-deps
 uv pip install --python .venv\Scripts\python.exe numpy httpx
 Pop-Location
 
-# --- tiny local mp4 fixture (2s, video+audio) built with WHATEVER ffmpeg
-#     this runner has, purely to synthesize the test input ---
+# --- tiny local mp4 fixture (2s, video+audio) — this runner has no ffmpeg
+#     at all (confirmed above), same as a real fresh user's machine, so we
+#     install one via choco JUST to synthesize the test input. This binary
+#     is never added to the sanitized PATH used for the actual repro run
+#     below — it only ever builds fixtures/sample.mp4. ---
 New-Item -ItemType Directory -Force -Path fixtures | Out-Null
 $fixture = (Resolve-Path fixtures).Path + "\sample.mp4"
 if (-not (Test-Path $fixture)) {
-    if (-not $ffmpegOnPath) {
-        Write-Host "BUGFIX_LAB_ABSENT (oracle could not build fixture: no ffmpeg on runner to synthesize it)"
+    $fixtureFfmpeg = if ($ffmpegOnPath) { $ffmpegOnPath.Source } else { $null }
+    if (-not $fixtureFfmpeg) {
+        Write-Host "no ffmpeg on runner; installing one via choco solely to build the fixture…"
+        choco install ffmpeg -y --no-progress | Out-Null
+        $fixtureFfmpeg = "C:\ProgramData\chocolatey\bin\ffmpeg.exe"
+        if (-not (Test-Path $fixtureFfmpeg)) {
+            $found = Get-Command ffmpeg -ErrorAction SilentlyContinue
+            if ($found) { $fixtureFfmpeg = $found.Source }
+        }
+    }
+    if (-not (Test-Path $fixtureFfmpeg)) {
+        Write-Host "BUGFIX_LAB_ABSENT (oracle could not build fixture: no ffmpeg obtainable on runner)"
         exit 2
     }
-    & $ffmpegOnPath.Source -y -f lavfi -i "testsrc=size=320x240:rate=10:duration=2" `
+    & $fixtureFfmpeg -y -f lavfi -i "testsrc=size=320x240:rate=10:duration=2" `
         -f lavfi -i "sine=frequency=440:duration=2" -shortest -pix_fmt yuv420p $fixture
 }
 
