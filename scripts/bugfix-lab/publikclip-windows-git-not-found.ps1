@@ -5,23 +5,25 @@
 # 2026-08-14/15): on a Windows machine with no Git for Windows on PATH (never
 # installed, or installed but PowerShell never reopened), publikclip's
 # Windows install guide's "clone" step (branch.steps[4], the 5th step Iris
-# actually walks a reader through -- see render-guide.mts output below) fails
-# with `git : The term 'git' is not recognized ...`, so the publikclip folder
-# is never created, and the following "Open the publikclip folder" step then
-# also fails with a PathNotFound error. The guide's own setupSteps (an
-# "Install Git" step) exist in lib/iris-guides.ts's prerequisiteSteps() but
-# publikclip's guide never opens with the "check-tools" step that every
-# sibling build-from-source guide (cue, freeharmony, lunara, noscroll,
-# nut-ai, whimprflow, hickeyfield, nitroai, simplicity, kneecap, nutcracker,
-# chatmany-mann, astro, openascii) uses to surface that recovery path, so a
-# reader following branch.steps in order (open-shell -> install-rust ->
-# install-cpp-tools -> install-uv -> clone) is never told to get Git at all.
+# actually walks a reader through -- see render-guide.mts output below) used
+# to fail with `git : The term 'git' is not recognized ...`, so the
+# publikclip folder was never created, and the following "Open the
+# publikclip folder" step then also failed with a PathNotFound error.
+#
+# FIX (this revision): publik@7fc0198 (fix/publikclip-windows-git-not-found,
+# based on origin/main e467460), guide version 7 -> 8. The "clone" step now
+# guards on `Get-Command git` and installs Git itself via winget (silent)
+# when it's missing, then refreshes $env:Path from the Machine+User registry
+# values -- confirmed live on windows-latest CI (throwaway probe, now
+# deleted) that this is where Git for Windows' installer actually registers
+# PATH. See lib/guides/publikclip.ts on that commit for the full comment.
 #
 # Commands below are rendered VERBATIM via:
-#   cd ~/publik && npx tsx ~/bugfix-lab/bin/render-guide.mts publikclip windows --to 6
-# against publik @ e467460 (origin/main, 2026-09-19), guide version 7,
-# sourceCommit a53a359b985b1d2d666266062936cc186f02340b (== publikclip's
-# current main -- this population is NOT on a stale pin).
+#   cd ~/publik (worktree at fix/publikclip-windows-git-not-found, 7fc0198)
+#   && npx tsx ~/bugfix-lab/bin/render-guide.mts publikclip windows --to 6
+# sourceCommit unchanged: a53a359b985b1d2d666266062936cc186f02340b (==
+# publikclip's current main -- this population is NOT on a stale pin; only
+# the guide's own step text changed, not what gets checked out).
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
@@ -53,12 +55,16 @@ Write-Host "git is now unresolvable on PATH, as the reporters had it."
 cd ~
 Remove-Item -Recurse -Force publikclip -ErrorAction SilentlyContinue
 
-Write-Host "=== step 5 (branch.steps[4], id=clone): 'Copy publikclip to this PC' -- run verbatim ==="
+Write-Host "=== step 5 (branch.steps[4], id=clone): 'Copy publikclip to this PC' -- run verbatim (post-fix text) ==="
 $step5Log = Join-Path $env:TEMP 'step5.log'
 $step6Log = Join-Path $env:TEMP 'step6.log'
 
 powershell -NoProfile -Command @'
 cd ~
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+winget install --id Git.Git -e --source winget --accept-source-agreements --accept-package-agreements
+$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User')
+}
 if (-not (Test-Path publikclip/.git)) {
 git clone https://github.com/Blueturboguy07/publikclip.git
 }
