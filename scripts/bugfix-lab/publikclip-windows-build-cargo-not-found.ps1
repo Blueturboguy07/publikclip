@@ -31,6 +31,19 @@ function Invoke-FreshShell {
     # Bounded: an installer that stalls waiting on input it will never get
     # (winget/msstore source sync has done this on GH's windows-latest) must
     # not hang the whole oracle -- kill the tree and report a timeout instead.
+    # IMPORTANT: stdout and stderr are read ASYNCHRONOUSLY via event
+    # handlers, never via a blocking ReadToEnd() before the process exits.
+    # A prior version of this function called
+    # StandardOutput.ReadToEnd() then StandardError.ReadToEnd() -- if the
+    # child wrote enough to stderr to fill the OS pipe buffer while stdout
+    # was still being drained (very plausible for verbose npm/cargo/winget
+    # output), the child blocks writing to stderr and we block reading
+    # stdout: a classic .NET Process deadlock that no WaitForExit(timeout)
+    # can ever reach, since it runs AFTER the blocking reads. This was
+    # confirmed against two real CI runs on this cluster (35436739291,
+    # 35436736873) that ran 20+ minutes with zero output past "Run oracle"
+    # despite this function's stated 5-minute bound -- the bound was dead
+    # code because execution never reached WaitForExit.
     $scriptPath = [System.IO.Path]::GetTempFileName() + ".ps1"
     Set-Content -LiteralPath $scriptPath -Value $Script -Encoding UTF8
     try {
@@ -41,12 +54,36 @@ function Invoke-FreshShell {
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.UseShellExecute = $false
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        $stdout = $proc.StandardOutput.ReadToEnd()
-        $stderr = $proc.StandardError.ReadToEnd()
+
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        $outBuilder = New-Object System.Text.StringBuilder
+        $errBuilder = New-Object System.Text.StringBuilder
+        $outEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action {
+            if ($null -ne $EventArgs.Data) { [void]$Event.MessageData.AppendLine($EventArgs.Data) }
+        } -MessageData $outBuilder
+        $errEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
+            if ($null -ne $EventArgs.Data) { [void]$Event.MessageData.AppendLine($EventArgs.Data) }
+        } -MessageData $errBuilder
+
+        [void]$proc.Start()
+        $proc.BeginOutputReadLine()
+        $proc.BeginErrorReadLine()
         $finished = $proc.WaitForExit($TimeoutSeconds * 1000)
+
         if (-not $finished) {
             try { Start-Process -FilePath "taskkill" -ArgumentList "/pid", "$($proc.Id)", "/T", "/F" -Wait -WindowStyle Hidden } catch {}
+            # Give buffered async output a moment to flush after the kill.
+            Start-Sleep -Seconds 2
+        }
+        Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue
+        Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
+        Remove-Job -Name $outEvent.Name -ErrorAction SilentlyContinue
+        Remove-Job -Name $errEvent.Name -ErrorAction SilentlyContinue
+
+        $stdout = $outBuilder.ToString()
+        $stderr = $errBuilder.ToString()
+        if (-not $finished) {
             return [PSCustomObject]@{
                 ExitCode = -1
                 Stdout   = $stdout
