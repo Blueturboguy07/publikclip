@@ -20,13 +20,17 @@ $ErrorActionPreference = 'Continue'
 function Invoke-FreshShell {
     param(
         [Parameter(Mandatory = $true)][string]$Script,
-        [Parameter(Mandatory = $true)][string]$WorkingDirectory
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [int]$TimeoutSeconds = 300
     )
     # Runs $Script in a BRAND NEW pwsh.exe process -- no profile, no inherited
     # in-memory state from whatever spawned it -- so env vars set by a prior
     # step (or by an installer's registry write that the CURRENT process never
     # re-reads) are exactly as absent/present as they would be for a reader who
     # reopened PowerShell, or for Iris's autopilot spawning the next command.
+    # Bounded: an installer that stalls waiting on input it will never get
+    # (winget/msstore source sync has done this on GH's windows-latest) must
+    # not hang the whole oracle -- kill the tree and report a timeout instead.
     $scriptPath = [System.IO.Path]::GetTempFileName() + ".ps1"
     Set-Content -LiteralPath $scriptPath -Value $Script -Encoding UTF8
     try {
@@ -40,7 +44,15 @@ function Invoke-FreshShell {
         $proc = [System.Diagnostics.Process]::Start($psi)
         $stdout = $proc.StandardOutput.ReadToEnd()
         $stderr = $proc.StandardError.ReadToEnd()
-        $proc.WaitForExit()
+        $finished = $proc.WaitForExit($TimeoutSeconds * 1000)
+        if (-not $finished) {
+            try { Start-Process -FilePath "taskkill" -ArgumentList "/pid", "$($proc.Id)", "/T", "/F" -Wait -WindowStyle Hidden } catch {}
+            return [PSCustomObject]@{
+                ExitCode = -1
+                Stdout   = $stdout
+                Stderr   = "$stderr`n[TIMED OUT after $TimeoutSeconds s]"
+            }
+        }
         return [PSCustomObject]@{
             ExitCode = $proc.ExitCode
             Stdout   = $stdout
@@ -101,8 +113,11 @@ if (-not $cargoExists) {
 # prepare-resources.mjs (run by tauri's beforeBuildCommand) shells out to `uv`,
 # so without this the package step fails for an unrelated reason (uv missing)
 # before we can see whether cargo itself resolved. Verbatim guide command.
+# Bounded to 5 min and NON-FATAL: this oracle's question is about cargo, not
+# uv/winget, so a stalled/slow winget here must not block the real check --
+# the package step's own cargo-metadata error text is what decides the verdict.
 Write-Host "== Step 1b: Install uv (guide step 'install-uv') =="
-$installUv = Invoke-FreshShell -WorkingDirectory $repoRoot -Script @'
+$installUv = Invoke-FreshShell -WorkingDirectory $repoRoot -TimeoutSeconds 300 -Script @'
 winget install --id astral-sh.uv -e --accept-source-agreements --accept-package-agreements
 Write-Host "winget uv install exit: $LASTEXITCODE"
 '@
