@@ -44,25 +44,35 @@ function Run-InCmd {
         [string]$Label,
         [string]$CommandText
     )
-    $batPath = Join-Path $work "$Label.bat"
-    # Written verbatim, line for line -- this is exactly what pasting the
-    # guide's copy-command block into an already-open cmd.exe window does:
-    # each line is parsed and executed by cmd.exe on its own.
-    Set-Content -Path $batPath -Value $CommandText -Encoding ASCII
-
-    $outPath = Join-Path $work "$Label.out.txt"
-    $errPath = Join-Path $work "$Label.err.txt"
-    $proc = Start-Process -FilePath "$env:WINDIR\System32\cmd.exe" `
-        -ArgumentList "/c", "call `"$batPath`"" `
-        -WorkingDirectory $work `
-        -NoNewWindow -Wait -PassThru `
-        -RedirectStandardOutput $outPath -RedirectStandardError $errPath
-
-    $stdout = if (Test-Path $outPath) { Get-Content $outPath -Raw } else { "" }
-    $stderr = if (Test-Path $errPath) { Get-Content $errPath -Raw } else { "" }
+    # A first attempt ran the whole block as one .bat via `cmd /c call file.bat`
+    # and found that cmd aborts the WHOLE batch (exit 255) after the first
+    # line's pipe (`Get-ChildItem ... | Select-Object ...`) fails to launch --
+    # later lines never even got a chance to print their own "not recognized"
+    # error, which would have under-counted the failure. Running each line as
+    # its own freshly spawned `cmd.exe /c` process sidesteps that and is at
+    # least as faithful a model of "pasting this block into an open cmd.exe
+    # window" -- each Enter press submits one line for cmd to execute, and a
+    # failed line never stops the ones after it in a real interactive session.
+    $lines = $CommandText -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 }
+    $combined = ""
+    $lastExit = 0
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        $outPath = Join-Path $work "$Label.$i.out.txt"
+        $errPath = Join-Path $work "$Label.$i.err.txt"
+        $proc = Start-Process -FilePath "$env:WINDIR\System32\cmd.exe" `
+            -ArgumentList "/c", $line `
+            -WorkingDirectory $work `
+            -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $outPath -RedirectStandardError $errPath
+        $stdout = if (Test-Path $outPath) { Get-Content $outPath -Raw } else { "" }
+        $stderr = if (Test-Path $errPath) { Get-Content $errPath -Raw } else { "" }
+        $combined += "`n> $line`n$stdout`n$stderr"
+        $lastExit = $proc.ExitCode
+    }
     return @{
-        ExitCode = $proc.ExitCode
-        Output   = "$stdout`n$stderr"
+        ExitCode = $lastExit
+        Output   = $combined
     }
 }
 
