@@ -1,0 +1,20 @@
+name: bugfix-lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "Path (under scripts/bugfix-lab/) of the .ps1 oracle body to run"
+        required: true
+
+jobs:
+  windows-oracle:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run oracle body
+        shell: pwsh
+        run: |
+          & ".\${{ github.event.inputs.script }}"
+          exit $LASTEXITCODE
