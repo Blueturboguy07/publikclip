@@ -108,6 +108,17 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
     except queue.StageError as err:
         _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": str(err)})
         return 1
+    except Exception as err:  # noqa: BLE001 — a stage crash must still emit a result event
+        # A stage's underlying dependency (whisperX/huggingface_hub during
+        # model load, ffmpeg, torch, …) can raise its own exception type
+        # instead of queue.StageError. Previously that escaped this
+        # function uncaught, killed the sidecar with a bare traceback, and
+        # left main.rs/App.tsx with no "result" event to show — just the
+        # generic "pipeline exited unexpectedly" banner while the UI was
+        # still on the last progress message. Emit an attributed result so
+        # the app can surface the real error and the user can resume.
+        _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": repr(err)})
+        return 1
     summary = {
         "ok": True,
         "job_id": job.id,
