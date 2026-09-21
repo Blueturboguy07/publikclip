@@ -1,0 +1,36 @@
+name: bugfix-lab
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/publikclip-windows-nsis-bundle-missing
+
+jobs:
+  oracle:
+    # Reproduces the reported symptom: the guide's "package" step (tauri
+    # build --bundles nsis) fails to produce a bundle -- here forced by
+    # denying cargo a working MSVC linker, the same real-world class as
+    # "missing C++ Desktop workload" -- and the very next guide step,
+    # "install-app", is then run VERBATIM against that state.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run oracle (package step forced to fail, then install-app verbatim)
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bugfix-lab/publikclip-windows-nsis-bundle-missing.ps1
+
+  control_clean_build:
+    # Sensitivity check, not part of the pass/fail contract: with a working
+    # toolchain (nothing forced to fail), does the SAME install-app command
+    # succeed once package has actually produced a bundle? Re-confirms this
+    # independently rather than trusting the Sep 19 cargo-not-found cluster's
+    # run of the same commit.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run clean control (package step allowed to succeed)
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bugfix-lab/publikclip-windows-nsis-bundle-missing-control.ps1
