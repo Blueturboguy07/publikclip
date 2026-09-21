@@ -104,12 +104,38 @@ class EventsStage(Stage):
         # --- Channel 2: PANNs AudioSet tagger (32 kHz) --------------------
         ctx.emit(0.35, "Detecting audio events (PANNs)…")
         t0 = time.monotonic()
-        ckpt = registry.ensure(specs.PANNS_CNN14_MAX, lambda f, m: ctx.emit(0.35 + f * 0.1, m))
+        try:
+            ckpt = registry.ensure(specs.PANNS_CNN14_MAX, lambda f, m: ctx.emit(0.35 + f * 0.1, m))
+        except Exception as err:
+            # registry.ensure() raises a bare RuntimeError on a failed
+            # download or a sha256 mismatch (models/registry.py) — neither
+            # is a StageError, so it previously escaped cli.py's
+            # `except queue.StageError` uncaught and crashed the sidecar.
+            raise StageError(f"Couldn't prepare the audio-event model: {err}") from err
         wav32 = ctx.job_dir / "audio32k.wav"
         if not wav32.exists():
             _extract_wav(media, wav32, panns_models.SAMPLE_RATE)
         y32k, _ = librosa.load(str(wav32), sr=panns_models.SAMPLE_RATE, mono=True)
-        pmodel = panns_models.load_model(str(ckpt), device)
+        try:
+            pmodel = panns_models.load_model(str(ckpt), device)
+        except Exception as err:
+            # This spec (models/specs.py PANNS_CNN14_MAX) has no sha256
+            # pinned, so registry.ensure() above trusts an already-cached
+            # file with zero integrity check — a corrupted/truncated cache
+            # makes torch.load() raise pickle.UnpicklingError / RuntimeError
+            # / zipfile.BadZipFile depending on the truncation point, none
+            # of which is a StageError either. Unwrapped, that crashed the
+            # whole Python sidecar with no final result event (bugfix-lab
+            # cluster publikclip-pipeline-exit-listen-panns) — the UI then
+            # showed a generic "pipeline exited unexpectedly" banner and
+            # every "Resume" just re-ran this stage into the same crash,
+            # since the events checkpoint is only written after a
+            # successful return. Name the exact file so the user has a
+            # concrete next step instead of a dead end.
+            raise StageError(
+                f"The audio-event model file looks corrupted. Delete {ckpt} "
+                "and resume the job to re-download it."
+            ) from err
         probs_by_type, fps = panns_channel.framewise_probs(
             pmodel, y32k, device,
             progress=lambda f: ctx.emit(0.45 + f * 0.35, "Detecting audio events…"),

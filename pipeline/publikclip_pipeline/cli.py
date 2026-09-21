@@ -108,6 +108,21 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
     except queue.StageError as err:
         _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": str(err)})
         return 1
+    except Exception as err:  # noqa: BLE001 - last-resort sidecar safety net
+        # A stage can raise something other than StageError that isn't
+        # wrapped at its call site (this cluster: a corrupted PANNs
+        # checkpoint's torch.load() failure in events/stage.py).
+        # queue.run_stages() already recorded stage attribution for it
+        # (mark_stage + set_job_status, both called before its own
+        # `except Exception` re-raises) — read that back instead of
+        # letting the process die uncaught with nothing on stdout: the
+        # Tauri shell pipes our stderr to Stdio::null(), so an uncaught
+        # traceback here is invisible to the user and shows up only as
+        # the generic "pipeline exited unexpectedly" banner.
+        failed_job = queue.get_job(job.id)
+        error = failed_job.error if failed_job and failed_job.error else repr(err)
+        _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": error})
+        return 1
     summary = {
         "ok": True,
         "job_id": job.id,
