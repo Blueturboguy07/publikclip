@@ -65,14 +65,14 @@ if (-not (Test-Path $pipelineDir)) { throw "bundled pipeline dir missing: $pipel
 # Rust app (home_dir()) and the Python pipeline (config.home_dir()) so the
 # CLI-triggered failed run and the relaunched app see the exact same state
 # a real user's default ~\.publikclip would hold across two launches.
-$home = $env:PUBLIKCLIP_HOME
-if (-not $home) { throw "PUBLIKCLIP_HOME not set — expected the workflow to set it" }
-New-Item -ItemType Directory -Force -Path $home | Out-Null
+$appHome = $env:PUBLIKCLIP_HOME
+if (-not $appHome) { throw "PUBLIKCLIP_HOME not set — expected the workflow to set it" }
+New-Item -ItemType Directory -Force -Path $appHome | Out-Null
 
 Write-Host "=== simulate 'entered API key' + finished onboarding ==="
 $secrets = @{ gemini_api_key = "oracle-fake-key-not-real" } | ConvertTo-Json
-Set-Content -Path (Join-Path $home "secrets.json") -Value $secrets
-Set-Content -Path (Join-Path $home "onboarded") -Value "1"
+Set-Content -Path (Join-Path $appHome "secrets.json") -Value $secrets
+Set-Content -Path (Join-Path $appHome "onboarded") -Value "1"
 
 Write-Host "=== run a job to a failure state (same invocation run_job spawns) ==="
 # 11-char not-a-real-video id: fails fast and deterministically at the
@@ -87,7 +87,7 @@ $pipelineExit = $LASTEXITCODE
 Write-Host "pipeline CLI exit code: $pipelineExit (nonzero is EXPECTED — this is the reporter's pipeline error)"
 
 Write-Host "=== job/db state left behind under PUBLIKCLIP_HOME ==="
-Get-ChildItem -Recurse $home | ForEach-Object { Write-Host $_.FullName }
+Get-ChildItem -Recurse $appHome | ForEach-Object { Write-Host $_.FullName }
 
 # No app GUI process exists yet in this run (the failing job above was
 # driven straight through the CLI, not the Tauri window), so there is
