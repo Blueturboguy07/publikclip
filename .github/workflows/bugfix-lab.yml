@@ -1,0 +1,13 @@
+name: bugfix-lab
+
+on:
+  workflow_dispatch:
+
+jobs:
+  oracle:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run oracle
+        shell: powershell
+        run: .\scripts\bugfix-lab\publikclip-windows-installer-command-not-recognized.ps1
