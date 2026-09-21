@@ -73,15 +73,21 @@ class IngestStage(Stage):
 
         if info.vfr:
             cfr_path = ctx.job_dir / "media_cfr.mp4"
-            if not cfr_path.exists():
-                normalize.normalize_to_cfr(media_path, cfr_path, info.fps, prog)
-            media_path = cfr_path
-            info = normalize.probe(media_path)
+            try:
+                if not cfr_path.exists():
+                    normalize.normalize_to_cfr(media_path, cfr_path, info.fps, prog)
+                media_path = cfr_path
+                info = normalize.probe(media_path)
+            except normalize.FfmpegError as err:
+                raise StageError(str(err)) from err
 
         prog(0.98, "Extracting analysis audio…")
         audio_path = ctx.job_dir / "audio16k.wav"
-        if not audio_path.exists():
-            normalize.extract_analysis_audio(media_path, audio_path)
+        try:
+            if not audio_path.exists():
+                normalize.extract_analysis_audio(media_path, audio_path)
+        except normalize.FfmpegError as err:
+            raise StageError(str(err)) from err
 
         from ..jobs import queue as jobs_queue
 
