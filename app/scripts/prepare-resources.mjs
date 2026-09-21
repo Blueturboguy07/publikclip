@@ -43,9 +43,19 @@ cpSync(path.join(repoDir, "pipeline"), path.join(res, "pipeline"), {
 // uv: copy the host binary (same arch as the build machine / bundle target).
 const uvName = process.platform === "win32" ? "uv.exe" : "uv";
 const locator = process.platform === "win32" ? "where" : "which";
-const uvPath = execFileSync(locator, ["uv"], { encoding: "utf8" })
-  .split(/\r?\n/)[0]
-  .trim();
+// execFileSync throws on a nonzero exit (locator finds nothing) before this
+// line can ever inspect its result -- the friendly message below used to be
+// dead code on exactly the machines that need it (uv missing from PATH),
+// which instead saw a raw "Command failed: where uv" Node stack trace. Catch
+// that specific failure and fall through to the one intentional throw.
+let uvPath = "";
+try {
+  uvPath = execFileSync(locator, ["uv"], { encoding: "utf8" })
+    .split(/\r?\n/)[0]
+    .trim();
+} catch {
+  uvPath = "";
+}
 if (!uvPath || !existsSync(uvPath)) {
   throw new Error("uv not found on PATH — install it before building");
 }
