@@ -85,7 +85,7 @@ bar, and a caption-capable static ffmpeg is fetched automatically.
 
 ```sh
 # pipeline
-cd pipeline && uv sync && uv run pytest
+cd pipeline && uv sync --group dev --group pipeline && uv run pytest
 uv run publikclip run "https://www.youtube.com/watch?v=..."
 
 # app

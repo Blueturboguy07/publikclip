@@ -4,7 +4,37 @@ version = "0.1.0"
 description = "publikclip processing pipeline: long video in, scored vertical clips out"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.12,<3.13"
-dependencies = [
+# Intentionally empty: `uv run <anything>` (including a bare `publikclip
+# --jsonl run <url>`, exactly what the desktop app's sidecar invokes) syncs
+# ALL of [project.dependencies] before it will execute ANY command, no
+# matter how cheap that command is — see the "pipeline" group below and
+# cli.py's `_ensure_pipeline_deps()` for why the actual heavy deps live
+# there instead.
+dependencies = []
+
+[project.scripts]
+publikclip = "publikclip_pipeline.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+# The pipeline's real runtime dependencies. Deliberately NOT a default
+# group (see `tool.uv.default-groups` below) and deliberately not
+# `[project.optional-dependencies]` (those still get resolved+installed by
+# a bare `uv run`/`uv sync` the same as `dependencies` — only
+# dependency-groups outside `default-groups` are skipped by default).
+#
+# Why: the whole point of this split is so `uv run publikclip ...` can
+# start cli.py, create a job and print the first `{"event":"job",...}`
+# line even when this multi-GB, network-heavy install hasn't happened yet
+# or can't happen right now (see cli.py's `_execute()` /
+# `_ensure_pipeline_deps()`, which syncs this group itself, as an
+# explicit, reportable step, AFTER that first event is already on
+# stdout — instead of `uv run`'s own opaque pre-launch sync silently
+# blocking the process, with its real error going only to stderr, before
+# the app is even allowed to start).
+pipeline = [
     "httpx>=0.27",
     "librosa>=0.10",
     "numba>=0.60",
@@ -19,20 +49,29 @@ dependencies = [
     "whisperx==3.8.6",
 ]
 
-[project.scripts]
-publikclip = "publikclip_pipeline.cli:main"
-
-[dependency-groups]
-dev = [
-    "pytest>=8",
-]
+[tool.uv]
+# Neither group syncs by default. `dev` (pytest) has no business being
+# installed for the app's own `uv run publikclip ...` invocation either —
+# it was only ever needed for `uv run pytest`, which now asks for it
+# explicitly (`uv sync --group dev --group pipeline`, see README.md). A
+# bare `uv run publikclip ...` (what the desktop app's sidecar spawns)
+# now has zero required dependencies to sync, so it starts even with no
+# network and no pre-existing cache.
+default-groups = []
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+# uv's own native build backend (implemented inside the `uv` binary, not a
+# PyPI package `uv run` has to fetch) instead of hatchling. Building the
+# local project — needed for EVERY `uv run`, including a bare
+# `uv run publikclip ...` — used to silently need network to fetch
+# hatchling itself whenever the cache was empty (e.g. a fresh install);
+# uv_build needs neither network nor cache for this project's own build.
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
 
-[tool.hatch.build.targets.wheel]
-packages = ["publikclip_pipeline"]
+[tool.uv.build-backend]
+# This package lives directly under pipeline/ (no src/ layout).
+module-root = ""
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
