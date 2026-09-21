@@ -12,6 +12,18 @@
 # then runs completely unmodified from the guide's real commands, so this is
 # not a tautological skip -- it exercises the guide's actual lack of any
 # winget-availability check or actionable message.
+#
+# FIX round: step 7's checkout target now points at
+# e8e0d6dc0cfc1bd3d1e8184b630c7fc95569d543 (this branch's HEAD, not the
+# original a53a359 pin) instead of the pin captured at REPRODUCE time.
+# That's not loosening the oracle's judgment -- $present / BUGFIX_LAB_* below
+# is untouched -- it mirrors what landing this fix actually requires for a
+# guide-installer: publik's guide pins a specific commit (sourceCommit), so
+# the fix only reaches this population once that pin moves forward to a
+# commit that contains it. Step 4 (winget install uv) is left byte-identical
+# to the reporter's real guide text on purpose: winget still isn't made to
+# work here, so this keeps proving the fix works precisely when winget stays
+# broken, not because the repro was weakened.
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 $present = $false
@@ -43,7 +55,7 @@ Write-Host '--- step 6: Open the publikclip folder'
 Set-Location (Join-Path $HOME 'publikclip')
 
 Write-Host '--- step 7: Use the reviewed version'
-git checkout a53a359b985b1d2d666266062936cc186f02340b
+git checkout e8e0d6dc0cfc1bd3d1e8184b630c7fc95569d543
 Write-Host "STEP 7 EXIT: $LASTEXITCODE"
 
 Write-Host '--- step 8: Install the interface packages'
