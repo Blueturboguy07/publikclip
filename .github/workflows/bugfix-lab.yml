@@ -1,0 +1,31 @@
+name: bugfix-lab
+on:
+  workflow_dispatch:
+
+jobs:
+  repro:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PUBLIKCLIP_HOME: ${{ github.workspace }}\.publikclip-home
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: pipeline/uv.lock
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Run cluster repro script
+        shell: pwsh
+        run: pwsh -File scripts/bugfix-lab/publikclip-windows-app-wont-relaunch.ps1
