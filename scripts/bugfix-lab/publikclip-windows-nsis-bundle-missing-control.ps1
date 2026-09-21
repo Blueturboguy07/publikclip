@@ -73,6 +73,11 @@ Write-Host $dep.Output
 Say "npm install exit: $($dep.ExitCode)"
 if ($dep.ExitCode -ne 0) { Say "BUGFIX_LAB_INCONCLUSIVE: npm install itself failed"; exit 2 }
 
+Say "=== GUIDE STEP install-uv: winget install --id astral-sh.uv -e ... (verbatim) ==="
+$uv = Invoke-FreshShell -Script "winget install --id astral-sh.uv -e --accept-source-agreements --accept-package-agreements" -WorkingDirectory $appDir -TimeoutSeconds 420
+Write-Host $uv.Output
+Say "winget uv exit: $($uv.ExitCode) timedOut: $($uv.TimedOut)"
+
 Say "=== GUIDE STEP package (verbatim, working toolchain) ==="
 $packageScript = @'
 $env:Path = "$env:USERPROFILE\.cargo\bin;$env:LOCALAPPDATA\Microsoft\WinGet\Links;$env:Path"

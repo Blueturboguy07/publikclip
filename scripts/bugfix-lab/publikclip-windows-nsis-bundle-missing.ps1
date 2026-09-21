@@ -5,12 +5,26 @@
 #   Get-ChildItem : Cannot find path '...src-tauri\target\release\bundle\nsis' because
 #   it does not exist.
 # The reporter attached no screenshot of the prior "package" step (position 8), so the
-# upstream cause of THAT step's failure is unconfirmed. This oracle forces one concrete,
-# plausible real-world cause the cluster notes name explicitly (missing C++ build tools /
-# no working MSVC linker -- distinct from the already-separately-tracked cargo-not-found
-# cluster, whose PATH-insurance line this repo's guide already carries and which a Sep 19
-# CI run proved does NOT break this guide's package step) and then runs the guide's
-# "install-app" command VERBATIM against the resulting state.
+# upstream cause of THAT step's failure is unconfirmed. This oracle denies the "package"
+# step a working MSVC linker (CARGO_TARGET_..._LINKER pointed at a nonexistent exe) as
+# insurance for a "missing C++ build tools" precondition failure, and ALSO does not run
+# the guide's "install-uv" step first -- deliberately mirroring a reader who reached the
+# build without uv resolvable on PATH.
+#
+# MEASURED (2026-09-21, run 35661893868 on windows-latest): the guide's own
+# beforeBuildCommand (`node scripts/prepare-resources.mjs && npm run build`) calls out to
+# `where uv` and fails with "Error: Command failed: where uv" BEFORE cargo/rustc ever
+# starts, so the linker-denial line above was never exercised -- uv-not-on-PATH alone is
+# sufficient to make "package" produce no bundle at all. This is a genuinely different
+# Windows-specific PATH gap than publikclip-windows-build-cargo-not-found (that cluster is
+# about cargo.exe itself, not uv, and this guide's cargo/uv PATH-insurance line does not
+# reach the beforeBuildCommand's own separate `where uv` check), matching the cluster
+# notes' own hypothesis that the upstream cause could be "a different PATH gap" than
+# cargo. The linker-denial line is left in as a second, independent way to deny a bundle
+# in case a future run's environment already has uv resolvable.
+#
+# Either way, the guide's "install-app" command is then run VERBATIM against the
+# resulting state, exactly as a reader would type it next.
 #
 # Exit 1 = bug PRESENT: install-app's own Get-ChildItem throws the reporter's exact
 #          "Cannot find path ...bundle\nsis..." error because package really did leave no
