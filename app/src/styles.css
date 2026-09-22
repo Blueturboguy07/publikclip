@@ -957,3 +957,37 @@ body {
 .loop-pick img { width: 44px; height: 78px; object-fit: cover; border: 1px solid var(--line); flex: none; }
 .loop-pick-meta { display: flex; flex-direction: column; gap: 4px; font-size: 11px; min-width: 0; }
 .loop-pick-meta .mono { color: var(--amber); font-size: 12px; }
+
+/* ---------- publik API ---------- */
+.publik-ready { display: grid; gap: 10px; margin-top: 12px; }
+.publik-ready p { font-size: 14px; color: var(--dim); line-height: 1.55; }
+.publik-balance { color: var(--text) !important; font-size: 13px !important; }
+.publik-fine { font-size: 12px !important; color: var(--faint) !important; }
+.publik-link { border-color: var(--amber-dim); color: var(--amber); justify-self: start; }
+.publik-link:hover { border-color: var(--amber); }
+.publik-row { margin-bottom: 8px; }
+.publik-row .audit-label { margin-bottom: 10px; }
+.publik-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 12px; }
+.publik-banner {
+  margin-top: 28px;
+  max-width: 780px;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  background: rgba(255, 178, 36, 0.07);
+  border: 1px solid rgba(255, 178, 36, 0.35);
+  padding: 16px 18px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.publik-banner .led { margin-top: 6px; flex: none; }
+.rail-balance { font-size: 11px; color: var(--dim); line-height: 1.5; margin-bottom: 8px; }
+.btn-link {
+  font: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--amber);
+  cursor: pointer;
+}
+.btn-link:hover { text-decoration: underline; }

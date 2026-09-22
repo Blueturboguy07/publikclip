@@ -20,8 +20,8 @@ horizontal video file and produces vertical 9:16 clips with:
 Every model — speech recognition, forced alignment, diarization, laughter
 detection, audio tagging, face detection, active-speaker detection — runs
 locally. The only network calls are the video download and 2–3 small LLM calls
-(bring your own Gemini key, or run fully local via Ollama at reduced scoring
-quality).
+(publik API by default — no key to paste; or bring your own Gemini key, or run
+fully local via Ollama at reduced scoring quality).
 
 ## Status
 
@@ -59,8 +59,9 @@ open /Applications/publikclip.app
 
 The app downloads its speech/audio models (~4–5 GB) on first run with a
 progress UI, and fetches a caption-capable static ffmpeg automatically if the
-machine has none. Scoring uses your own Gemini API key, or a local Ollama
-model at reduced scoring quality — onboarding walks through both.
+machine has none. Scoring runs on publik API by default; your own Gemini API
+key or a local Ollama model (reduced scoring quality) are one tap away in
+onboarding.
 
 ## Install from source (Windows)
 
@@ -87,6 +88,11 @@ bar, and a caption-capable static ffmpeg is fetched automatically.
 # pipeline
 cd pipeline && uv sync --group dev --group pipeline && uv run pytest
 uv run publikclip run "https://www.youtube.com/watch?v=..."
+
+# pick the brain per run: --llm publik (default) | gemini | ollama
+# publik API from a terminal, no GUI: PUBLIK_API_KEY=pk_live_... (optional
+# PUBLIK_API_BASE_URL, default https://publikhq.com/api/v1); own key:
+# PUBLIKCLIP_GEMINI_API_KEY=AIza...
 
 # app
 cd app && npm install && npm run tauri dev

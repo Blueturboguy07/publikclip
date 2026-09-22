@@ -82,6 +82,30 @@ export interface SetupState {
   onboarded: boolean
 }
 
+/** publik_status: everything the UI shows about publik API — never the key. */
+export interface PublikStatus {
+  provisioned: boolean
+  claim_state: 'anonymous' | 'claimed'
+  claim_url: string | null
+  add_credit_url: string | null
+  /** from POST /installs, shown verbatim — the app never writes its own */
+  disclosure: { version?: number; cost?: string; data_path?: string } | null
+  /** ~/.publikclip/publik-status.json, rewritten by the pipeline after every call */
+  status: {
+    balance_micros?: number | null
+    starter_micros?: number | null
+    starter_remaining_micros?: number | null
+    last_charge_micros?: number
+    claim_state?: 'anonymous' | 'claimed'
+    needs_credit?: boolean
+    disconnected?: boolean
+    reprovision?: boolean
+    top_up_url?: string | null
+    message?: string | null
+    updated_at?: number
+  }
+}
+
 /* ---------- the Instagram loop ---------- */
 
 export interface LoopMetrics {

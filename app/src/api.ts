@@ -1,5 +1,5 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
-import type { JobResults, JobSummary, LoopOverview, SetupState, SyncSummary } from './types'
+import type { JobResults, JobSummary, LoopOverview, PublikStatus, SetupState, SyncSummary } from './types'
 
 export const api = {
   runJob: (source: string, llm: string, captions: string) =>
@@ -25,5 +25,12 @@ export const api = {
     invoke<{ ok: boolean }>('ig_tool', { args: ['unlink', mediaId] }),
   igReject: (mediaId: string, jobId: string, clip: number) =>
     invoke<{ ok: boolean }>('ig_tool', { args: ['reject', mediaId, jobId, String(clip)] }),
+  publikStatus: () => invoke<PublikStatus>('publik_status'),
+  publikProvision: () => invoke<PublikStatus>('publik_provision'),
+  publikDisconnect: () => invoke<PublikStatus>('publik_disconnect'),
   fileUrl: (path: string) => convertFileSrc(path)
 }
+
+/** micros → "$0.18" (publik API balances are integer micros of a dollar). */
+export const dollars = (micros?: number | null) =>
+  micros == null ? '' : '$' + (micros / 1_000_000).toFixed(2)

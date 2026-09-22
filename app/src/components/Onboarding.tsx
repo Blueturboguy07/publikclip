@@ -1,10 +1,16 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import type { PublikStatus } from '../types'
+import { PUBLIK_DATA_PATH, PUBLIK_PRE_SETUP, PublikReady } from './PublikCard'
 
 /**
- * Three beats: what this is → pick the brain (Gemini key or local Ollama) →
- * go. The optional Instagram feedback module gets its own guided flow later
- * (Settings → Connect Instagram), so first-run stays under a minute.
+ * Three beats: what this is → pick the brain (publik API preselected, your
+ * own Gemini key, or local Ollama) → go. The optional Instagram feedback
+ * module gets its own guided flow later (Settings → Connect Instagram), so
+ * first-run stays under a minute.
+ *
+ * "Continue with publik API" is the consent moment: nothing is posted to
+ * publik before that tap, and "Use my own key instead" never provisions.
  */
 
 interface Props {
@@ -16,10 +22,28 @@ export default function Onboarding({ onDone }: Props) {
   const [key, setKey] = useState('')
   const [saved, setSaved] = useState(false)
   const [ollama, setOllama] = useState<{ running: boolean; models: string[] } | null>(null)
+  const [brain, setBrain] = useState<'publik' | 'gemini' | 'ollama'>('publik')
+  const [publik, setPublik] = useState<PublikStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
 
   useEffect(() => {
     api.checkOllama().then(setOllama).catch(() => setOllama({ running: false, models: [] }))
+    // A reinstall on a computer that already has a key skips the mint.
+    api.publikStatus().then((p) => p.provisioned && setPublik(p)).catch(() => null)
   }, [])
+
+  async function connectPublik() {
+    setBusy(true)
+    setNote(null)
+    try {
+      setPublik(await api.publikProvision())
+    } catch (err) {
+      setNote(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   async function saveKey() {
     if (!key.trim()) return
@@ -56,12 +80,46 @@ export default function Onboarding({ onDone }: Props) {
           <p className="ob-kicker">01 / the scoring brain</p>
           <h2 className="ob-h2">Pick how moments get judged</h2>
           <div className="ob-cards">
-            <div className={`ob-card ${saved ? 'done' : ''}`}>
-              <h3>Gemini key <span className="chip chip-amber">recommended</span></h3>
+            <div
+              className={`ob-card ${brain === 'publik' ? '' : 'dim'} ${publik?.provisioned ? 'done' : ''}`}
+              onClick={() => setBrain('publik')}
+            >
+              <h3>publik API <span className="chip chip-amber">preselected</span></h3>
+              {publik?.provisioned ? (
+                <>
+                  <button className="btn-secondary" disabled>publik API ready ✓</button>
+                  <PublikReady publik={publik} />
+                </>
+              ) : (
+                <>
+                  <p>{PUBLIK_PRE_SETUP}</p>
+                  <p>{PUBLIK_DATA_PATH}</p>
+                  <div className="ob-key-row">
+                    <button className="btn-secondary" onClick={connectPublik} disabled={busy}>
+                      {busy ? 'Setting up…' : 'Continue with publik API'}
+                    </button>
+                    <button
+                      className="btn-ghost"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setBrain('gemini')
+                      }}
+                    >
+                      Use my own key instead
+                    </button>
+                  </div>
+                </>
+              )}
+              {note && <p className="ig-message mono">{note}</p>}
+            </div>
+            <div
+              className={`ob-card ${brain === 'gemini' ? '' : 'dim'} ${saved ? 'done' : ''}`}
+              onClick={() => setBrain('gemini')}
+            >
+              <h3>Your own Gemini key</h3>
               <p>
-                Bring your own key (aistudio.google.com). Costs roughly{' '}
-                <span className="mono">$0.15</span> per hour of source video. Best
-                humor and shock judgment.
+                Prefer your own Google key? Paste it here (aistudio.google.com);
+                publikclip then talks to Google directly.
               </p>
               <div className="ob-key-row">
                 <input
@@ -76,7 +134,10 @@ export default function Onboarding({ onDone }: Props) {
                 </button>
               </div>
             </div>
-            <div className={`ob-card ${ollama?.running ? '' : 'dim'}`}>
+            <div
+              className={`ob-card ${ollama?.running && brain === 'ollama' ? '' : 'dim'}`}
+              onClick={() => setBrain('ollama')}
+            >
               <h3>
                 Ollama <span className={`led ${ollama?.running ? 'led-on' : 'led-off'}`} />
               </h3>
@@ -96,7 +157,7 @@ export default function Onboarding({ onDone }: Props) {
           <button
             className="btn-primary"
             onClick={() => setStep(2)}
-            disabled={!saved && !ollama?.running}
+            disabled={!publik?.provisioned && !saved && !ollama?.running}
           >
             Continue
           </button>
