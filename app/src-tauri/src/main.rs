@@ -11,7 +11,9 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
-fn home_dir() -> PathBuf {
+mod publik;
+
+pub(crate) fn home_dir() -> PathBuf {
     if let Ok(custom) = std::env::var("PUBLIKCLIP_HOME") {
         return PathBuf::from(custom);
     }
@@ -49,7 +51,7 @@ fn uv_project_environment() -> Option<PathBuf> {
 /// Command that never flashes a console window on Windows (CREATE_NO_WINDOW).
 /// Every pipeline/tool spawn goes through this — a GUI app popping cmd.exe
 /// windows for each sidecar call reads as malware to most people.
-fn quiet_command(program: &str) -> Command {
+pub(crate) fn quiet_command(program: &str) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(program);
     #[cfg(target_os = "windows")]
@@ -286,20 +288,7 @@ fn list_job_dirs() -> Result<Vec<Value>, String> {
 
 #[tauri::command]
 fn save_gemini_key(key: String) -> Result<bool, String> {
-    let home = home_dir();
-    fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    let path = home.join("secrets.json");
-    let mut current: Value = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!({}));
-    current["gemini_api_key"] = json!(key.trim());
-    fs::write(&path, serde_json::to_string_pretty(&current).unwrap()).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-    }
+    publik::merge_secret("gemini_api_key", json!(key.trim()))?;
     Ok(true)
 }
 
@@ -398,15 +387,9 @@ fn save_clip_edits(job_id: String, edits: Value) -> Result<(), String> {
 
 #[tauri::command]
 fn save_pexels_key(key: String) -> Result<bool, String> {
-    let home = home_dir();
-    fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    let path = home.join("secrets.json");
-    let mut current: Value = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!({}));
-    current["pexels_api_key"] = json!(key.trim());
-    fs::write(&path, serde_json::to_string_pretty(&current).unwrap()).map_err(|e| e.to_string())?;
+    // Same merge + chmod 600 path as every other key (a Pexels-first user
+    // used to get the umask default here).
+    publik::merge_secret("pexels_api_key", json!(key.trim()))?;
     Ok(true)
 }
 
@@ -522,7 +505,10 @@ fn main() {
             run_edit_render,
             save_clip_edits,
             save_pexels_key,
-            export_clip
+            export_clip,
+            publik::publik_provision,
+            publik::publik_status,
+            publik::publik_disconnect
         ])
         .setup(|app| {
             let _ = app.get_webview_window("main");
