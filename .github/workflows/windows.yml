@@ -8,6 +8,10 @@ name: windows
 on:
   push:
     branches: [main, win-port]
+  # Windows CI used to run only after a merge, so a change that broke the
+  # Windows build was only discoverable on main. The macOS job runs on PRs;
+  # this one should too.
+  pull_request:
   workflow_dispatch:
 
 jobs:
