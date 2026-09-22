@@ -5,9 +5,10 @@ explicit things being talked about (objects, places, amounts, situations).
 Deliberately generous (the user wants overdone-and-removable); every item
 lands on the timeline where it can be deleted, moved, resized.
 
-Fetchers: Pexels (free BYO key, real photos, license-clean) and Gemini
-image generation (the funded key's image models — on-topic for absurd or
-specific scenes stock can't match). Images cache into
+Fetchers: Pexels (free BYO key, real photos, license-clean) and AI image
+generation through the job's brain — publik API's image alias, or the
+user's own Gemini key (on-topic for absurd or specific scenes stock can't
+match). Images cache into
 <job_dir>/overlays/ and are referenced by path in the edit state.
 """
 
@@ -124,26 +125,35 @@ def fetch_pexels(query: str, job_dir: Path) -> str | None:
         return None
 
 
-GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
+GEMINI_IMAGE_MODEL = llm_mod.GEMINI_IMAGE_MODEL
 
 
-def fetch_gemini(query: str, job_dir: Path) -> str | None:
-    key = llm_mod.gemini_api_key()
-    if not key:
+def fetch_gemini(query: str, job_dir: Path, llm_mode: str = "publik") -> str | None:
+    """Image generation through the brain the job scores with: publik API
+    (the publik-image alias) or the user's own Gemini key. Ollama jobs only
+    ever use a key the user pasted themselves — never publik balance."""
+    try:
+        endpoint = llm_mod.resolve_endpoint("gemini" if llm_mode == "ollama" else llm_mode)
+    except llm_mod.LlmError:
         return None
     dest = _overlay_dir(job_dir) / f"gm_{hashlib.sha256(query.encode()).hexdigest()[:12]}.png"
     if dest.exists():
         return str(dest)
     try:
         res = httpx.post(
-            llm_mod.GEMINI_URL.format(model=GEMINI_IMAGE_MODEL),
-            params={"key": key},
+            endpoint.url(endpoint.image_model),
+            headers={"x-goog-api-key": endpoint.key},
             json={
                 "contents": [{"parts": [{"text": f"A clean, punchy illustrative photo for a video overlay: {query}. No text in the image."}]}],
                 "generationConfig": {"responseModalities": ["IMAGE"]},
             },
             timeout=60.0,
         )
+        if endpoint.provider == "publik":
+            if res.status_code in (401, 402, 403):
+                # surfaces through cli.py's suggest-visuals as {"ok": false, "error": …}
+                raise llm_mod._publik_error(res)  # noqa: SLF001
+            llm_mod._record_publik_status(res)  # noqa: SLF001
         res.raise_for_status()
         for part in res.json()["candidates"][0]["content"]["parts"]:
             data = part.get("inlineData") or part.get("inline_data")
@@ -157,11 +167,17 @@ def fetch_gemini(query: str, job_dir: Path) -> str | None:
     return None
 
 
-def fetch_image(query: str, job_dir: Path, prefer: str = "pexels") -> tuple[str | None, str]:
+def fetch_image(
+    query: str, job_dir: Path, prefer: str = "pexels", llm_mode: str = "publik"
+) -> tuple[str | None, str]:
     """(path, source). Tries the preferred source, falls back to the other."""
     order = ["pexels", "gemini"] if prefer == "pexels" else ["gemini", "pexels"]
     for source in order:
-        path = fetch_pexels(query, job_dir) if source == "pexels" else fetch_gemini(query, job_dir)
+        path = (
+            fetch_pexels(query, job_dir)
+            if source == "pexels"
+            else fetch_gemini(query, job_dir, llm_mode)
+        )
         if path:
             return path, source
     return None, "none"
@@ -173,7 +189,7 @@ def suggest(job_dir: Path, words: list[dict], llm_mode: str, prefer: str = "pexe
     plans = plan_overlays(words, llm_mode)
     out: list[Overlay] = []
     for i, plan in enumerate(plans):
-        path, source = fetch_image(plan["query"], job_dir, prefer)
+        path, source = fetch_image(plan["query"], job_dir, prefer, llm_mode)
         if not path:
             continue
         out.append(

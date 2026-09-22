@@ -7,15 +7,19 @@ Everything lives under PUBLIKCLIP_HOME (default ~/.publikclip):
       bin/                managed binaries (yt-dlp)
       models/             downloaded model weights
       jobs/<job_id>/      per-job artifacts (media, audio, stage checkpoints)
+      secrets.json        keys (0600): publik API block, own Gemini key, Pexels
+      publik-status.json  publik API balance line, written after every call
 
-The desktop app points PUBLIKCLIP_HOME at its own app-data dir; the CLI uses
-the default. Artifacts on disk are the source of truth — the DB only records
+The desktop shell and the CLI both use the same resolution (PUBLIKCLIP_HOME,
+else ~/.publikclip), so secrets.json written by onboarding is what the
+pipeline reads. Artifacts on disk are the source of truth — the DB only records
 what should exist so a stage can decide whether to skip itself on resume.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,6 +42,22 @@ def models_dir() -> Path:
 
 def db_path() -> Path:
     return home_dir() / "db.sqlite3"
+
+
+def publik_status_path() -> Path:
+    return home_dir() / "publik-status.json"
+
+
+def publik_shared_file() -> Path:
+    """The per-app credential file publik's convention names — read-only
+    here, a last fallback; this app's own store is secrets.json."""
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support" / "publik" / "apps"
+    elif os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "publik" / "apps"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "publik" / "apps"
+    return base / "publikclip.json"
 
 
 def ensure_home() -> Path:
@@ -80,7 +100,8 @@ class Settings:
     camera: CameraSettings = field(default_factory=CameraSettings)
     lufs_target: float = -14.0  # decision #8: configurable per destination
     true_peak_db: float = -1.0
-    llm_mode: str = "gemini"  # 'gemini' (BYO key) | 'ollama' (local fallback)
+    # 'publik' (publik API, default) | 'gemini' (your own key) | 'ollama' (local)
+    llm_mode: str = "publik"
     caption_preset: str = "classic"
     # jrgillick laughter specialist: 10 ms precision but ~300k CPU forward
     # passes on an hour-plus source. OFF by default — PANNs' AudioSet
@@ -105,7 +126,7 @@ class Settings:
             camera=cam,
             lufs_target=data.get("lufs_target", -14.0),
             true_peak_db=data.get("true_peak_db", -1.0),
-            llm_mode=data.get("llm_mode", "gemini"),
+            llm_mode=data.get("llm_mode", "publik"),
             caption_preset=data.get("caption_preset", "classic"),
             laughter_specialist=data.get("laughter_specialist", False),
         )

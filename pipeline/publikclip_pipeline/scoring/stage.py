@@ -3,7 +3,8 @@ frames on the finalists → per-platform composites + music briefs, all with
 full provenance (decision #3).
 
 Cost shape: ~35 T1 text calls + ~12 T2 vision calls + ~12 music calls per
-video on Gemini Flash. In Ollama mode T2 is skipped (recorded as a missing
+video on a Gemini-class model (publik API's publik-vision alias, or the
+user's own Gemini key). In Ollama mode T2 is skipped (recorded as a missing
 signal) and scores are labeled local-estimate."""
 
 from __future__ import annotations
@@ -119,8 +120,11 @@ class ScoreStage(Stage):
             }
             try:
                 t1 = client.generate_json(rubric.t1_prompt(labeled, context), rubric.T1_SCHEMA)
-            except llm_mod.LlmError:
-                raise
+            except llm_mod.LlmError as err:
+                # StageError, not a bare re-raise: the CLI turns it into the
+                # {"ok": false, "error": …} result the app shows (a 402's
+                # top-up link included) instead of a crashed sidecar.
+                raise StageError(str(err)) from err
             except Exception as err:  # noqa: BLE001
                 ctx.emit(-1, f"moment {i + 1} scoring failed, skipping: {err}")
                 continue
@@ -184,6 +188,10 @@ class ScoreStage(Stage):
                             rubric.T2_SCHEMA,
                             images=imgs,
                         )
+                    except llm_mod.PublikStopError as err:
+                        # out of balance / disconnected: stop now, resumable
+                        # from checkpoints, rather than ship half-scored clips
+                        raise StageError(str(err)) from err
                     except Exception:  # noqa: BLE001 — visual is optional evidence
                         visual = None
             entry["t2"] = visual
@@ -219,6 +227,8 @@ class ScoreStage(Stage):
                     music_brief.MUSIC_SCHEMA,
                 )
                 entry["music"]["mood_prior"] = prior_mood
+            except llm_mod.PublikStopError as err:
+                raise StageError(str(err)) from err
             except Exception:  # noqa: BLE001 — a clip without a music brief still ships
                 entry["music"] = None
 
