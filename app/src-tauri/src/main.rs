@@ -26,6 +26,26 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// Where uv is allowed to create the pipeline's virtualenv.
+///
+/// A packaged build must never let uv create `.venv` next to the bundled
+/// pipeline source: on macOS that path is `publikclip.app/Contents/Resources`,
+/// inside the signed bundle, and the first write there invalidates the code
+/// signature — Gatekeeper then refuses to launch an app that opened fine a
+/// moment earlier. (Windows survives it today only because NSIS installs
+/// under LOCALAPPDATA, which happens to be writable.) Point uv at
+/// PUBLIKCLIP_HOME instead, where every other piece of mutable state already
+/// lives, so the bundle stays byte-identical to what was notarized.
+///
+/// Dev builds keep using the repo's own pipeline/.venv.
+fn uv_project_environment() -> Option<PathBuf> {
+    if cfg!(debug_assertions) {
+        None
+    } else {
+        Some(home_dir().join("env"))
+    }
+}
+
 /// Command that never flashes a console window on Windows (CREATE_NO_WINDOW).
 /// Every pipeline/tool spawn goes through this — a GUI app popping cmd.exe
 /// windows for each sidecar call reads as malware to most people.
@@ -36,6 +56,12 @@ fn quiet_command(program: &str) -> Command {
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    // Set here rather than at each uv call site: there are six of them, and a
+    // site that forgets it silently writes into the app bundle. Harmless on
+    // the one spawn that isn't uv (curl).
+    if let Some(env_dir) = uv_project_environment() {
+        cmd.env("UV_PROJECT_ENVIRONMENT", env_dir);
     }
     cmd
 }
@@ -80,6 +106,11 @@ fn pipeline_invocation() -> (String, Vec<String>) {
                 "--directory".to_string(),
                 resources.join("pipeline").to_string_lossy().to_string(),
                 "run".to_string(),
+                // Never re-resolve: re-locking would rewrite uv.lock inside
+                // the bundle, which is the same signature-breaking write that
+                // uv_project_environment() exists to prevent. The bundle ships
+                // a lock that matches the pyproject.toml beside it.
+                "--frozen".to_string(),
                 "publikclip".to_string(),
             ],
         )

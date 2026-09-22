@@ -1,0 +1,189 @@
+# Cut a real release: a signed+notarized macOS dmg and the Windows NSIS
+# installer, attached to a GitHub release.
+#
+# Until this existed, windows.yml built a fully tested installer on every push
+# and then threw it away as an expiring CI artifact, and no macOS build ran at
+# all -- which is why publikclip had no download on publikhq.com.
+#
+# Secrets this needs on THIS repo (publik has the notarization half; the
+# certificate half lives only in NitroAI so far):
+#     APPLE_CERTIFICATE            base64 of the Developer ID .p12
+#     APPLE_CERTIFICATE_PASSWORD   its export passphrase
+#     APPLE_SIGNING_IDENTITY       "Developer ID Application: Mann Bellani (R5R3ZS54LV)"
+#     APPLE_ID                     Apple account email
+#     APPLE_PASSWORD               app-specific password
+#     APPLE_TEAM_ID                R5R3ZS54LV
+#
+# It refuses to publish rather than quietly shipping an unsigned build: an
+# unsigned dmg is the "publikclip is damaged and can't be opened" bug, and
+# shipping that is worse than shipping nothing.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    outputs:
+      dmg: ${{ steps.build.outputs.dmg }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Refuse to ship unsigned
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=""
+          for v in CERT CERT_PW IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing signing secrets:$missing"
+            echo "::error::An unsigned dmg is the 'app is damaged' bug. Not publishing one."
+            exit 1
+          fi
+          # Fail in seconds on a revoked password instead of after a long build.
+          xcrun notarytool history --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" | head -3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: pipeline/uv.lock
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Build, sign and notarize the app
+        id: build
+        working-directory: app
+        env:
+          # Tauri signs the .app with these, then notarizes and staples it.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          npm ci
+          npx tauri build --bundles app,dmg
+          echo "dmg=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Sign, notarize and staple the dmg itself
+        env:
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # Tauri notarizes and staples the .app, not the disk image around it.
+        # A dmg that carries its own ticket validates with no network, so give
+        # it one too -- both halves stapled is what survives a clean machine.
+        run: |
+          set -euo pipefail
+          DMG="app/${{ steps.build.outputs.dmg }}"
+          codesign --force --timestamp -s "$IDENTITY" "$DMG"
+          xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$DMG"
+
+      - name: Prove a downloaded copy opens
+        run: |
+          set -uo pipefail
+          DMG="app/${{ steps.build.outputs.dmg }}"
+          FAIL=0
+          STAGE=$(mktemp -d)
+          cp "$DMG" "$STAGE/download.dmg"
+          # Exactly what a browser writes onto a download.
+          xattr -w com.apple.quarantine "0083;00000000;Safari;" "$STAGE/download.dmg"
+          spctl --assess --type open --context context:primary-signature -vv "$STAGE/download.dmg" || FAIL=1
+          hdiutil attach "$STAGE/download.dmg" -mountpoint "$STAGE/m" -nobrowse -readonly -quiet
+          cp -R "$STAGE/m/publikclip.app" "$STAGE/app.app"
+          hdiutil detach "$STAGE/m" -quiet
+          xattr -w com.apple.quarantine "0083;00000000;Safari;" "$STAGE/app.app"
+          spctl --assess --type execute -vv "$STAGE/app.app" || FAIL=1
+          xcrun stapler validate "$STAGE/app.app" || FAIL=1
+          xcrun stapler validate "$STAGE/download.dmg" || FAIL=1
+          [ "$FAIL" = "0" ] || { echo "::error::a downloaded copy would still be refused"; exit 1; }
+          echo "A downloaded copy opens with no warning."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: app/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      PUBLIKCLIP_HOME: ${{ github.workspace }}\.publikclip-home
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: pipeline/uv.lock
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      - name: Build the NSIS installer
+        working-directory: app
+        run: |
+          npm ci
+          npx tauri build --bundles nsis
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-setup
+          path: app/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  publish:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Attach both installers to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          find dist -type f \( -name '*.dmg' -o -name '*.exe' \) -print
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+                 --title "publikclip $TAG" --generate-notes
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            $(find dist -type f \( -name '*.dmg' -o -name '*.exe' \))
