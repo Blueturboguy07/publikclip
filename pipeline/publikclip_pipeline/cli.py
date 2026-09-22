@@ -91,7 +91,11 @@ def _ensure_pipeline_deps(jsonl: bool, emit) -> tuple[bool, str | None]:
     uv_bin = shutil.which("uv") or "uv"
     try:
         proc = subprocess.run(
-            [uv_bin, "--directory", str(pipeline_dir), "sync", "--group", "pipeline"],
+            # --frozen for the same reason main.rs passes it: in a packaged
+            # build pipeline_dir is inside the app bundle, and re-locking
+            # would write uv.lock there. UV_PROJECT_ENVIRONMENT (set by the
+            # shell that spawned us) keeps the venv itself out too.
+            [uv_bin, "--directory", str(pipeline_dir), "sync", "--frozen", "--group", "pipeline"],
             capture_output=True,
             text=True,
             timeout=3600,

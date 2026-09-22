@@ -1,0 +1,98 @@
+# The macOS counterpart of windows.yml: everything a Mac user's machine would
+# do, on a clean runner — resolve the Python env, fetch a caption-capable
+# ffmpeg, pass the pipeline test suite, build the .app and .dmg, then mount
+# the dmg and launch the app out of it.
+#
+# This job did not exist until now, which is why publikclip has never had a
+# dmg: the mac packaging path (tauri.conf targets ["dmg"], the packaged branch
+# in main.rs, prepare-resources.mjs staging bin/uv) was all written, but
+# nothing ever built it.
+name: macos
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      PUBLIKCLIP_HOME: ${{ github.workspace }}/.publikclip-home
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: pipeline/uv.lock
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Resolve the pipeline env
+        working-directory: pipeline
+        run: uv sync --group dev --group pipeline
+
+      - name: Fetch caption-capable ffmpeg
+        working-directory: pipeline
+        run: |
+          uv run python -c "from publikclip_pipeline.render import ffmpeg_bin; ok = ffmpeg_bin.ensure_capable(); print('resolved:', ffmpeg_bin.resolve()); assert ok, 'no subtitles-capable ffmpeg on macOS'"
+          echo "PUBLIKCLIP_FFMPEG=$PUBLIKCLIP_HOME/bin/ffmpeg" >> "$GITHUB_ENV"
+
+      - name: Pipeline test suite
+        working-directory: pipeline
+        run: uv run pytest -q
+
+      - name: Build the app + dmg
+        working-directory: app
+        run: |
+          npm ci
+          npx tauri build --bundles app,dmg
+
+      - name: The bundle must not carry a venv or a dev cache
+        # prepare-resources.mjs excludes .venv/__pycache__/tests, and
+        # uv_project_environment() keeps uv from creating one at runtime. If
+        # either regresses, the bundle grows by gigabytes and — once we sign —
+        # the first launch invalidates its own signature.
+        run: |
+          APP=app/src-tauri/target/release/bundle/macos/publikclip.app
+          RES="$APP/Contents/Resources/resources"
+          test -x "$RES/bin/uv" || { echo "::error::bundled uv missing from $RES/bin"; exit 1; }
+          test -f "$RES/pipeline/pyproject.toml" || { echo "::error::pipeline source missing from bundle"; exit 1; }
+          if find "$RES" -name .venv -maxdepth 3 | grep -q .; then
+            echo "::error::a .venv rode into the app bundle"; exit 1
+          fi
+          echo "bundle size: $(du -sh "$APP" | cut -f1)"
+
+      - name: Launch the app out of the mounted dmg
+        run: |
+          DMG=$(ls app/src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+          echo "dmg: $DMG ($(du -h "$DMG" | cut -f1))"
+          hdiutil attach "$DMG" -mountpoint /Volumes/publikclip-ci -nobrowse -quiet
+          cp -R /Volumes/publikclip-ci/publikclip.app /tmp/publikclip.app
+          hdiutil detach /Volumes/publikclip-ci -quiet
+          /tmp/publikclip.app/Contents/MacOS/publikclip &
+          PID=$!
+          sleep 15
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "::error::app exited within 15s of launching from the dmg"
+            exit 1
+          fi
+          echo "app alive after 15s (pid $PID) — killing"
+          kill "$PID"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: publikclip-macos-dmg
+          path: app/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error

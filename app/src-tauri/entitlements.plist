@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Notarization requires the hardened runtime, and the hardened runtime
+       breaks this app's whole reason for existing: it ships a uv binary that
+       downloads a CPython interpreter and multi-gigabyte native wheels
+       (torch, whisperx, opencv) into PUBLIKCLIP_HOME on first run, then
+       executes them. None of that is signed by us.
+
+       These are the narrowest entitlements that let that work. The app is
+       NOT sandboxed, so file and network access need no entitlement here. -->
+
+  <!-- Load native extension .so/.dylib files that Mann's Developer ID did
+       not sign — every compiled wheel in the pipeline group. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- uv and CPython both set DYLD_* when launching the interpreter and its
+       extension modules. -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+
+  <!-- torch compiles and executes kernels at runtime. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+</dict>
+</plist>
