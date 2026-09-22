@@ -38,7 +38,12 @@ jobs:
 
       - name: Resolve the pipeline env (uv sync on Windows)
         working-directory: pipeline
-        run: uv sync
+        # `dev` (pytest) and `pipeline` (torch/whisperx/opencv/...) are both
+        # dependency-groups outside uv's default-groups on purpose — see
+        # pyproject.toml — so the app's own `uv run publikclip ...` isn't
+        # forced to sync this whole multi-GB graph before it can even start.
+        # CI still wants both up front, for the steps below.
+        run: uv sync --group dev --group pipeline
 
       - name: Fetch caption-capable ffmpeg (Windows static build)
         working-directory: pipeline

@@ -63,6 +63,54 @@ def _emit_result(jsonl: bool, payload: dict) -> None:
         print(json.dumps(payload, indent=2))
 
 
+def _ensure_pipeline_deps(jsonl: bool, emit) -> tuple[bool, str | None]:
+    """First-run bootstrap for the `pipeline` dependency-group (whisperx,
+    torch-via-whisperx, opencv, speechbrain, ...).
+
+    That group is deliberately NOT one of uv's default-groups (see
+    pyproject.toml) — a bare `uv run publikclip ...` (exactly what the
+    desktop app's sidecar spawns) would otherwise try to sync it, and every
+    dependency in the whole graph, before `main()` gets to run at all: if
+    that opaque pre-launch sync fails (no network, a blocked host, a first
+    run interrupted), the child exits non-zero having written to stdout
+    only ever once `job` has already been printed by `_execute()` below.
+
+    Returns (ok, error_message). On failure, error_message is the real
+    stderr tail from `uv sync`, suitable for `_emit_result`.
+    """
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    marker = config.home_dir() / ".pipeline_deps_synced"
+    if marker.exists():
+        return True, None
+
+    emit("env", -1, "Installing pipeline dependencies (one-time setup)…")
+    pipeline_dir = Path(__file__).resolve().parent.parent
+    uv_bin = shutil.which("uv") or "uv"
+    try:
+        proc = subprocess.run(
+            [uv_bin, "--directory", str(pipeline_dir), "sync", "--group", "pipeline"],
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+    except Exception as err:  # noqa: BLE001 — surface, don't crash silently
+        return False, f"could not start `uv sync --group pipeline`: {err}"
+
+    if proc.returncode != 0:
+        tail = "\n".join((proc.stderr or proc.stdout or "").strip().splitlines()[-12:])
+        return False, tail or f"`uv sync --group pipeline` exited {proc.returncode}"
+
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("ok")
+    except OSError:
+        pass  # best-effort cache; a missing marker just re-syncs (fast, no-op) next run
+    return True, None
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     source = args.source
     source_type = "url" if source.startswith(("http://", "https://")) else "file"
@@ -103,6 +151,17 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
         print(json.dumps({"event": "job", "job_id": job.id, "dir": str(job.dir)}), flush=True)
     else:
         print(f"job {job.id} → {job.dir}", file=sys.stderr)
+    ok, err = _ensure_pipeline_deps(jsonl, emit)
+    if not ok:
+        _emit_result(
+            jsonl,
+            {
+                "ok": False,
+                "job_id": job.id,
+                "error": f"Couldn't install pipeline dependencies (one-time setup): {err}",
+            },
+        )
+        return 1
     try:
         results = queue.run_stages(job, _stages(), emit)
     except queue.StageError as err:
