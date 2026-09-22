@@ -24,3 +24,12 @@ jobs:
         run: |
           $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
           .\scripts\bugfix-lab\publikclip-pipeline-exit-ingest-audio-extract.ps1
+    inputs:
+      script:
+        description: "Path (under scripts/bugfix-lab/) of the .ps1 oracle body to run"
+        required: true
+  windows-oracle:
+    timeout-minutes: 60
+      - name: Run oracle body
+          & ".\${{ github.event.inputs.script }}"
+          exit $LASTEXITCODE
