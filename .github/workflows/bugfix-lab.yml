@@ -1,0 +1,26 @@
+name: bugfix-lab
+
+on:
+  workflow_dispatch:
+  # workflow_dispatch requires the workflow file to already be registered on
+  # the default branch, which it isn't yet for this repo/cluster's first
+  # bugfix-lab run — and we never push to main. `push` on the fix branch
+  # itself has no such restriction, so it's the bootstrap trigger for this
+  # run (same pattern as fix/publikclip-pipeline-exit-checkpoint-unknown-stage).
+  push:
+    branches:
+      - fix/publikclip-pipeline-exit-speakers-model
+
+jobs:
+  repro:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install uv
+        run: irm https://astral.sh/uv/install.ps1 | iex
+        shell: powershell
+      - name: run cluster repro script
+        shell: pwsh
+        run: |
+          $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+          .\scripts\bugfix-lab\publikclip-pipeline-exit-speakers-model.ps1
