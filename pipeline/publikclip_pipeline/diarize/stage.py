@@ -29,9 +29,35 @@ class DiarizeStage(Stage):
         from . import campplus, cluster
 
         ctx.emit(-1, "Loading speaker model…")
-        ckpt = registry.ensure(specs.CAMPPLUS, lambda f, m: ctx.emit(f * 0.2, m))
-        device = torch.device("cpu")
-        model = campplus.load_model(str(ckpt), device)
+        try:
+            ckpt = registry.ensure(specs.CAMPPLUS, lambda f, m: ctx.emit(f * 0.2, m))
+            device = torch.device("cpu")
+            model = campplus.load_model(str(ckpt), device)
+        except Exception as err:
+            # registry.ensure() trusts an already-cached file with zero
+            # integrity check (CAM++ has no sha256 pinned in models/specs.py,
+            # and even a *fresh* download is only verified `if spec.sha256:`)
+            # so a silently truncated/corrupted download is cached forever
+            # and campplus.load_model()'s torch.load() fails the identical
+            # way on every subsequent run — matching the report ("it always
+            # fails in loading speaker model step") since Resume just re-runs
+            # this stage against the same bad file. Clear the cache so the
+            # next attempt re-downloads instead of repeating the crash, and
+            # raise a specific, resumable StageError instead of letting the
+            # raw torch/pickle exception escape uncaught — an uncaught
+            # exception here crashes the whole sidecar process with its
+            # stderr discarded (app/src-tauri/src/main.rs redirects it to
+            # Stdio::null()), which is what produced the generic "pipeline
+            # exited unexpectedly" banner with no stage attribution.
+            try:
+                registry.model_path(specs.CAMPPLUS).unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise StageError(
+                "Speaker model checkpoint failed to load and has been "
+                "cleared from the cache — resume to re-download it and "
+                "retry diarization."
+            ) from err
 
         import librosa
 
