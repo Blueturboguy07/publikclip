@@ -1,35 +1,37 @@
 name: bugfix-lab
 
+# Manual oracle runner. A cluster's repro body lives in scripts/bugfix-lab/
+# as a .ps1 that exits 1 when the bug is PRESENT, 0 when it is ABSENT and 2
+# when it could not run; this dispatches one of them on a real Windows
+# runner, which is the only way to observe the Windows-only failures.
+#
+# Dispatch only: it must never fire on push. A previous revision carried a
+# `push:` trigger for a fix branch that no longer exists, and a merge of two
+# copies of this file left the second job with no `runs-on` and no `steps`,
+# so every push produced a red "invalid workflow file" run.
+
 on:
   workflow_dispatch:
-  # workflow_dispatch requires the workflow file to already be registered on
-  # the default branch, which it isn't yet for this repo/branch (first
-  # bugfix-lab run for this cluster) and we never push to main. `push` on
-  # the fix branch itself has no such restriction, so it's the bootstrap
-  # trigger for this run.
-  push:
-    branches:
-      - fix/publikclip-pipeline-exit-ingest-audio-extract
-
-jobs:
-  repro:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: install uv
-        run: irm https://astral.sh/uv/install.ps1 | iex
-        shell: powershell
-      - name: run cluster repro script
-        shell: pwsh
-        run: |
-          $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
-          .\scripts\bugfix-lab\publikclip-pipeline-exit-ingest-audio-extract.ps1
     inputs:
       script:
-        description: "Path (under scripts/bugfix-lab/) of the .ps1 oracle body to run"
+        description: "Path under scripts/bugfix-lab/ of the .ps1 oracle body to run"
         required: true
+        default: publikclip-windows-build-fails-then-launch-fails.ps1
+
+jobs:
   windows-oracle:
+    runs-on: windows-latest
     timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
       - name: Run oracle body
-          & ".\${{ github.event.inputs.script }}"
+        shell: pwsh
+        run: |
+          $body = Join-Path "scripts/bugfix-lab" "${{ inputs.script }}"
+          if (-not (Test-Path $body)) {
+            Write-Host "oracle body not found: $body"
+            exit 2
+          }
+          & $body
           exit $LASTEXITCODE
