@@ -153,14 +153,12 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
         print(f"job {job.id} → {job.dir}", file=sys.stderr)
     ok, err = _ensure_pipeline_deps(jsonl, emit)
     if not ok:
-        _emit_result(
-            jsonl,
-            {
-                "ok": False,
-                "job_id": job.id,
-                "error": f"Couldn't install pipeline dependencies (one-time setup): {err}",
-            },
-        )
+        message = f"Couldn't install pipeline dependencies (one-time setup): {err}"
+        # run_stages() never ran, so nothing else will move this job off
+        # "pending" -- record the failure here or the row stays pending
+        # forever and `publikclip jobs` shows it as still queued.
+        queue.set_job_status(job.id, "failed", message)
+        _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": message})
         return 1
     try:
         results = queue.run_stages(job, _stages(), emit)
@@ -174,9 +172,13 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
         # function uncaught, killed the sidecar with a bare traceback, and
         # left main.rs/App.tsx with no "result" event to show — just the
         # generic "pipeline exited unexpectedly" banner while the UI was
-        # still on the last progress message. Emit an attributed result so
-        # the app can surface the real error and the user can resume.
-        _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": repr(err)})
+        # still on the last progress message. run_stages() already recorded
+        # stage attribution before re-raising (mark_stage + set_job_status),
+        # so read that back: it names the stage that died, which a bare
+        # repr(err) does not.
+        failed_job = queue.get_job(job.id)
+        error = failed_job.error if failed_job and failed_job.error else repr(err)
+        _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": error})
         return 1
     summary = {
         "ok": True,

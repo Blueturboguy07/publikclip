@@ -161,6 +161,12 @@ def test_cli_execute_reports_panns_crash_gracefully_not_uncaught(tmp_path, monke
 
     monkeypatch.setenv("PUBLIKCLIP_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(cli, "_stages", lambda: [ExplodingEventsStage()])
+    # Stand in for a machine that has already done the one-time dep sync.
+    # Without this the bootstrap shells out to `uv sync`, which under pytest
+    # cannot replace the running pytest.exe on Windows -- _execute() would
+    # then return 1 before reaching any stage and this test would assert
+    # nothing about the crash path it exists to cover.
+    monkeypatch.setattr(cli, "_ensure_pipeline_deps", lambda jsonl, emit: (True, None))
 
     job = queue.create_job("file", "/tmp/does-not-matter.mp4", _settings_json())
     # _execute() must not raise -- that's the crash this cluster is about.
@@ -169,3 +175,21 @@ def test_cli_execute_reports_panns_crash_gracefully_not_uncaught(tmp_path, monke
     fetched = queue.get_job(job.id)
     assert fetched.status == "failed"
     assert fetched.error  # ...but reported it, not crashed silently
+
+
+def test_cli_execute_marks_job_failed_when_dep_bootstrap_fails(tmp_path, monkeypatch):
+    """The one-time `uv sync --group pipeline` can fail (no network, a
+    blocked host, an interrupted first run). _execute() reports it, but the
+    job row must not be left at "pending" -- `publikclip jobs` would list it
+    as still queued forever and nothing would ever retry or clear it."""
+
+    monkeypatch.setenv("PUBLIKCLIP_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        cli, "_ensure_pipeline_deps", lambda jsonl, emit: (False, "network unreachable")
+    )
+
+    job = queue.create_job("file", "/tmp/does-not-matter.mp4", _settings_json())
+    assert cli._execute(job, jsonl=False) == 1
+    fetched = queue.get_job(job.id)
+    assert fetched.status == "failed"
+    assert "network unreachable" in fetched.error
