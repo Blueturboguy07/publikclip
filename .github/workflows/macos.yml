@@ -81,11 +81,18 @@ jobs:
           hdiutil attach "$DMG" -mountpoint /Volumes/publikclip-ci -nobrowse -quiet
           cp -R /Volumes/publikclip-ci/publikclip.app /tmp/publikclip.app
           hdiutil detach /Volumes/publikclip-ci -quiet
-          /tmp/publikclip.app/Contents/MacOS/publikclip &
+          # Ask the bundle for its executable rather than guessing: the
+          # Rust crate is publikclip-app, the product is publikclip, and the
+          # two names differ.
+          BIN=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" \
+            /tmp/publikclip.app/Contents/Info.plist)
+          echo "executable: $BIN"
+          "/tmp/publikclip.app/Contents/MacOS/$BIN" >/tmp/app.log 2>&1 &
           PID=$!
           sleep 15
           if ! kill -0 "$PID" 2>/dev/null; then
             echo "::error::app exited within 15s of launching from the dmg"
+            echo "--- app output ---"; cat /tmp/app.log
             exit 1
           fi
           echo "app alive after 15s (pid $PID) — killing"
