@@ -27,3 +27,9 @@ app/dist/
 
 # Staged at build time by app/scripts/prepare-resources.sh — never committed
 app/src-tauri/resources/
+
+# Credentials and logs — defensive; keys normally live outside the repo
+secrets.json
+.env
+.env.*
+*.log

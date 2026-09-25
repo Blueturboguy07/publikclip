@@ -328,29 +328,52 @@ async fn check_ollama() -> Result<Value, String> {
     Ok(json!({"running": true, "models": models}))
 }
 
-/// Sync pipeline call that returns one JSON blob (edit context, visual
-/// suggestions). Long-running render-clip goes through run_edit_render
-/// instead so progress streams.
-#[tauri::command]
-async fn edit_tool(args: Vec<String>) -> Result<Value, String> {
+/// Run `publikclip <args...>` and parse the last JSON line — the contract
+/// edit_tool/ig_tool/the audio_* commands all rely on (progress lines, if
+/// any, may precede the final payload).
+fn run_cli_json(args: Vec<String>) -> Result<Value, String> {
     let (program, base_args) = pipeline_invocation();
     let mut full = base_args;
-    full.push("edit".to_string());
     full.extend(args);
     let out = quiet_command(&program)
         .args(&full)
         .output()
         .map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // last JSON line is the payload (progress lines may precede it)
     let line = stdout.lines().rev().find(|l| l.trim_start().starts_with('{'));
     match line.and_then(|l| serde_json::from_str::<Value>(l).ok()) {
         Some(v) => Ok(v),
         None => Err(format!(
-            "edit tool produced no JSON: {}",
+            "publikclip produced no JSON: {}",
             String::from_utf8_lossy(&out.stderr).chars().take(400).collect::<String>()
         )),
     }
+}
+
+/// Sync pipeline call that returns one JSON blob (edit context, visual
+/// suggestions). Long-running render-clip goes through run_edit_render
+/// instead so progress streams.
+#[tauri::command]
+async fn edit_tool(args: Vec<String>) -> Result<Value, String> {
+    let mut full = vec!["edit".to_string()];
+    full.extend(args);
+    run_cli_json(full)
+}
+
+/// Fetches the curated starter pack — can take a while (several downloads),
+/// so it streams progress over the same pipeline-event channel as
+/// run_job/run_edit_render rather than blocking behind a sync call.
+#[tauri::command]
+fn run_audio_bootstrap(app: AppHandle) -> Result<(), String> {
+    let (program, base_args) = pipeline_invocation();
+    std::thread::spawn(move || {
+        let mut args = base_args.clone();
+        args.push("--jsonl".to_string());
+        args.push("audio".to_string());
+        args.push("bootstrap".to_string());
+        stream_pipeline(&app, &program, &args);
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -391,6 +414,118 @@ fn save_pexels_key(key: String) -> Result<bool, String> {
     // used to get the umask default here).
     publik::merge_secret("pexels_api_key", json!(key.trim()))?;
     Ok(true)
+}
+
+fn save_secret(secret_key: &str, value: String) -> Result<bool, String> {
+    let home = home_dir();
+    fs::create_dir_all(&home).map_err(|e| e.to_string())?;
+    let path = home.join("secrets.json");
+    let mut current: Value = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}));
+    current[secret_key] = json!(value.trim());
+    fs::write(&path, serde_json::to_string_pretty(&current).unwrap()).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn save_freesound_key(key: String) -> Result<bool, String> {
+    save_secret("freesound_key", key)
+}
+
+#[tauri::command]
+fn save_jamendo_key(key: String) -> Result<bool, String> {
+    save_secret("jamendo_client_id", key)
+}
+
+#[tauri::command]
+fn audio_keys_status() -> Result<Value, String> {
+    let secrets = home_dir().join("secrets.json");
+    let data: Value = fs::read_to_string(&secrets)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}));
+    let has = |k: &str| data[k].as_str().map(|v| !v.is_empty()).unwrap_or(false);
+    Ok(json!({
+        "has_freesound_key": has("freesound_key"),
+        "has_jamendo_key": has("jamendo_client_id"),
+    }))
+}
+
+/// Local music/sfx library — import/list/remove, all shelling to `publikclip
+/// audio ...` like edit_tool shells to `publikclip edit ...`.
+#[tauri::command]
+async fn audio_import(paths: Vec<String>, kind: String) -> Result<Value, String> {
+    let mut args = vec!["audio".to_string(), "import".to_string()];
+    args.extend(paths);
+    args.push("--kind".to_string());
+    args.push(kind);
+    run_cli_json(args)
+}
+
+#[tauri::command]
+async fn audio_list(kind: Option<String>, query: Option<String>) -> Result<Value, String> {
+    let mut args = vec!["audio".to_string(), "list".to_string(), "--json".to_string()];
+    if let Some(k) = kind {
+        args.push("--kind".to_string());
+        args.push(k);
+    }
+    if let Some(q) = query {
+        if !q.is_empty() {
+            args.push("--query".to_string());
+            args.push(q);
+        }
+    }
+    run_cli_json(args)
+}
+
+#[tauri::command]
+async fn audio_remove(id: String) -> Result<Value, String> {
+    run_cli_json(vec!["audio".to_string(), "remove".to_string(), id])
+}
+
+#[tauri::command]
+async fn audio_search(
+    query: String,
+    source: String,
+    kind: String,
+    max_duration: Option<f64>,
+    allow_attribution: bool,
+) -> Result<Value, String> {
+    let mut args = vec![
+        "audio".to_string(),
+        "search".to_string(),
+        query,
+        "--source".to_string(),
+        source,
+        "--kind".to_string(),
+        kind,
+        "--json".to_string(),
+    ];
+    if let Some(d) = max_duration {
+        args.push("--max-duration".to_string());
+        args.push(d.to_string());
+    }
+    if allow_attribution {
+        args.push("--allow-attribution".to_string());
+    }
+    run_cli_json(args)
+}
+
+#[tauri::command]
+async fn audio_fetch(source: String, source_id: String) -> Result<Value, String> {
+    run_cli_json(vec!["audio".to_string(), "fetch".to_string(), source, source_id])
+}
+
+#[tauri::command]
+async fn audio_suggest(job_id: String, clip: u32) -> Result<Value, String> {
+    run_cli_json(vec![
+        "edit".to_string(),
+        "audio-suggest".to_string(),
+        job_id,
+        clip.to_string(),
+    ])
 }
 
 #[tauri::command]
@@ -438,23 +573,9 @@ async fn ig_connect(app_id: String, app_secret: String) -> Result<String, String
 /// (sync / overview / link / unlink / reject — same contract as edit_tool).
 #[tauri::command]
 async fn ig_tool(args: Vec<String>) -> Result<Value, String> {
-    let (program, base_args) = pipeline_invocation();
-    let mut full = base_args;
-    full.push("ig".to_string());
+    let mut full = vec!["ig".to_string()];
     full.extend(args);
-    let out = quiet_command(&program)
-        .args(&full)
-        .output()
-        .map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let line = stdout.lines().rev().find(|l| l.trim_start().starts_with('{'));
-    match line.and_then(|l| serde_json::from_str::<Value>(l).ok()) {
-        Some(v) => Ok(v),
-        None => Err(format!(
-            "ig tool produced no JSON: {}",
-            String::from_utf8_lossy(&out.stderr).chars().take(400).collect::<String>()
-        )),
-    }
+    run_cli_json(full)
 }
 
 #[tauri::command]
@@ -508,7 +629,17 @@ fn main() {
             export_clip,
             publik::publik_provision,
             publik::publik_status,
-            publik::publik_disconnect
+            publik::publik_disconnect,
+            save_freesound_key,
+            save_jamendo_key,
+            audio_keys_status,
+            audio_import,
+            audio_list,
+            audio_remove,
+            audio_search,
+            audio_fetch,
+            audio_suggest,
+            run_audio_bootstrap
         ])
         .setup(|app| {
             let _ = app.get_webview_window("main");

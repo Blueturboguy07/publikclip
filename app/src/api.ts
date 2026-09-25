@@ -1,5 +1,16 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
-import type { JobResults, JobSummary, LoopOverview, PublikStatus, SetupState, SyncSummary } from './types'
+import type {
+  AudioItem,
+  AudioKeysStatus,
+  JobResults,
+  JobSummary,
+  LibraryItem,
+  LoopOverview,
+  OnlineAudioResult,
+  PublikStatus,
+  SetupState,
+  SyncSummary
+} from './types'
 
 export const api = {
   runJob: (source: string, llm: string, captions: string) =>
@@ -28,7 +39,32 @@ export const api = {
   publikStatus: () => invoke<PublikStatus>('publik_status'),
   publikProvision: () => invoke<PublikStatus>('publik_provision'),
   publikDisconnect: () => invoke<PublikStatus>('publik_disconnect'),
-  fileUrl: (path: string) => convertFileSrc(path)
+  fileUrl: (path: string) => convertFileSrc(path),
+
+  /* ---------- music / sfx library ---------- */
+  audioImport: (paths: string[], kind: 'auto' | 'music' | 'sfx') =>
+    invoke<{ ok: boolean; items: LibraryItem[]; error?: string }>('audio_import', { paths, kind }),
+  audioList: (kind?: 'music' | 'sfx', query?: string) =>
+    invoke<{ ok: boolean; items: LibraryItem[] }>('audio_list', { kind, query }),
+  audioRemove: (id: string) => invoke<{ ok: boolean }>('audio_remove', { id }),
+  audioSearch: (
+    query: string,
+    source: 'freesound' | 'jamendo' | 'all',
+    kind: 'music' | 'sfx',
+    maxDuration: number | undefined,
+    allowAttribution: boolean
+  ) =>
+    invoke<{ ok: boolean; results: OnlineAudioResult[]; error?: string }>('audio_search', {
+      query, source, kind, maxDuration, allowAttribution
+    }),
+  audioFetch: (source: 'freesound' | 'jamendo', sourceId: string) =>
+    invoke<{ ok: boolean; item?: LibraryItem; error?: string }>('audio_fetch', { source, sourceId }),
+  audioSuggest: (jobId: string, clip: number) =>
+    invoke<{ ok: boolean; audio: AudioItem[]; error?: string }>('audio_suggest', { jobId, clip }),
+  saveFreesoundKey: (key: string) => invoke<boolean>('save_freesound_key', { key }),
+  saveJamendoKey: (key: string) => invoke<boolean>('save_jamendo_key', { key }),
+  audioKeysStatus: () => invoke<AudioKeysStatus>('audio_keys_status'),
+  runAudioBootstrap: () => invoke<void>('run_audio_bootstrap')
 }
 
 /** micros → "$0.18" (publik API balances are integer micros of a dollar). */

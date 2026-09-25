@@ -685,6 +685,85 @@ body {
 .ov-fields { display: flex; flex-direction: column; gap: 10px; font-size: 12px; }
 .ov-delete { color: var(--red); border-color: rgba(255,92,73,0.4); margin-left: 10px; }
 
+/* ---------- audio track (music/sfx) ---------- */
+.audio-track { display: flex; align-items: center; gap: 12px; }
+.audio-rail {
+  position: relative; flex: 1; height: 34px;
+  background: var(--panel); border: 1px solid var(--line);
+}
+.audio-rail-drop { border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); }
+.audio-item {
+  position: absolute; top: 4px; bottom: 4px;
+  display: flex; align-items: center;
+  cursor: grab; overflow: hidden;
+}
+.audio-item-music { background: rgba(61, 214, 163, 0.16); border: 1px solid #1f9c74; }
+.audio-item-sfx { background: rgba(255, 178, 36, 0.16); border: 1px solid var(--amber-dim); }
+.audio-item-suggested { border-style: dashed; }
+.audio-label { font-family: var(--mono); font-size: 9px; color: var(--text); padding: 0 8px; white-space: nowrap; }
+.audio-accept {
+  font-family: var(--mono); font-size: 9px; color: #14100a; background: var(--amber);
+  border: 0; padding: 0 6px; margin-left: auto; align-self: stretch; cursor: pointer; flex: none;
+}
+.audio-inspector {
+  display: flex; flex-direction: column; gap: 10px;
+  background: var(--panel); border: 1px solid var(--line); padding: 12px 16px; font-size: 12px;
+}
+.audio-inspector-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.audio-inspector-row label { color: var(--dim); font-size: 11px; min-width: 70px; }
+.audio-inspector input[type='range'] { accent-color: var(--amber); }
+.audio-delete { color: var(--red); border-color: rgba(255,92,73,0.4); margin-left: auto; }
+
+/* ---------- library panel (music/sfx source browser) ---------- */
+.lib-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; width: 380px; z-index: 12;
+  background: var(--panel); border-left: 1px solid var(--line);
+  display: flex; flex-direction: column;
+  box-shadow: -20px 0 40px -20px rgba(0, 0, 0, 0.6);
+  animation: lib-slide 0.22s ease both;
+}
+@keyframes lib-slide { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+.lib-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px 0; }
+.lib-title { font-family: var(--display); font-size: 15px; letter-spacing: 0.02em; }
+.lib-tabs { display: flex; gap: 4px; padding: 14px 18px 0; border-bottom: 1px solid var(--line); }
+.lib-tab {
+  font-family: var(--mono); font-size: 11px; color: var(--dim); background: none;
+  border: 0; border-bottom: 2px solid transparent; padding: 8px 4px 10px; margin-right: 14px; cursor: pointer;
+}
+.lib-tab-on { color: var(--amber); border-bottom-color: var(--amber); }
+.lib-body { flex: 1; overflow-y: auto; padding: 14px 18px 24px; display: flex; flex-direction: column; gap: 12px; }
+.lib-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.lib-row input[type='text'], .lib-row input[type='search'] {
+  flex: 1; min-width: 0; font-size: 12px; background: var(--ink); border: 1px solid var(--line);
+  color: var(--text); padding: 9px 10px; outline: none;
+}
+.lib-row input:focus { border-color: var(--amber-dim); }
+.lib-toggle { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
+.lib-empty { font-size: 12px; color: var(--faint); padding: 20px 0; text-align: center; }
+.lib-item {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel-2); border: 1px solid var(--line); padding: 8px 10px; cursor: grab;
+}
+.lib-item-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.lib-item-name { font-size: 11px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lib-item-meta { font-family: var(--mono); font-size: 9px; color: var(--faint); }
+.lib-item-tags { font-family: var(--mono); font-size: 9px; color: var(--faint); }
+.lib-play {
+  width: 26px; height: 26px; flex: none; border-radius: 50%; border: 1px solid var(--line);
+  background: var(--panel); color: var(--text); cursor: pointer; font-size: 10px;
+}
+.lib-play-on { border-color: var(--amber); color: var(--amber); }
+.lib-remove { color: var(--red); background: none; border: 0; cursor: pointer; font-size: 12px; flex: none; }
+.lib-licence { font-family: var(--mono); font-size: 9px; padding: 1px 5px; border: 1px solid var(--line); color: var(--dim); white-space: nowrap; }
+.lib-licence-cc0 { color: var(--green); border-color: rgba(61,214,163,0.4); }
+.lib-licence-ccby { color: var(--amber); border-color: rgba(255,178,36,0.4); }
+.lib-add-btn { font-family: var(--mono); font-size: 9px; padding: 6px 10px; flex: none; }
+.lib-key-notice {
+  background: var(--ink); border: 1px solid var(--line); padding: 12px; font-size: 11px;
+  color: var(--dim); line-height: 1.6; display: flex; flex-direction: column; gap: 8px;
+}
+.lib-key-notice a { color: var(--amber); }
+
 /* ---------- source monitor (editor preview) ---------- */
 .monitor-src-wrap { display: flex; flex-direction: column; gap: 0; }
 .monitor-src-stage {
