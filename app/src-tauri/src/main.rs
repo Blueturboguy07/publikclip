@@ -65,7 +65,32 @@ pub(crate) fn quiet_command(program: &str) -> Command {
     if let Some(env_dir) = uv_project_environment() {
         cmd.env("UV_PROJECT_ENVIRONMENT", env_dir);
     }
+    // The sidecar runs `uv sync` itself on first launch. A desktop launch
+    // gives us a bare PATH with no uv on it, so tell the sidecar which uv to
+    // use instead of letting it look one up by name.
+    if !cfg!(debug_assertions) {
+        cmd.env("PUBLIKCLIP_UV", packaged_uv());
+    }
     cmd
+}
+
+/// The `resources` dir of a packaged build. macOS keeps it in the .app's
+/// Resources dir; Windows (NSIS) lands it next to the exe.
+fn packaged_resources() -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    if cfg!(target_os = "macos") {
+        exe_dir.join("../Resources/resources")
+    } else {
+        exe_dir.join("resources")
+    }
+}
+
+/// The uv binary shipped inside a packaged build.
+fn packaged_uv() -> PathBuf {
+    packaged_resources().join(if cfg!(target_os = "windows") { "bin/uv.exe" } else { "bin/uv" })
 }
 
 /// Where the Python pipeline lives and how to invoke it.
@@ -92,18 +117,9 @@ fn pipeline_invocation() -> (String, Vec<String>) {
         // Windows (NSIS) lands them in resources\ next to the exe. The venv
         // bootstraps into PUBLIKCLIP_HOME on first run (uv handles Python
         // 3.12 download + deps; the onboarding screen owns expectations).
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."));
-        let resources = if cfg!(target_os = "macos") {
-            exe_dir.join("../Resources/resources")
-        } else {
-            exe_dir.join("resources")
-        };
-        let uv = if cfg!(target_os = "windows") { "bin/uv.exe" } else { "bin/uv" };
+        let resources = packaged_resources();
         (
-            resources.join(uv).to_string_lossy().to_string(),
+            packaged_uv().to_string_lossy().to_string(),
             vec![
                 "--directory".to_string(),
                 resources.join("pipeline").to_string_lossy().to_string(),

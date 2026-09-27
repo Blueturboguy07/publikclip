@@ -12,6 +12,7 @@ import hashlib
 from pathlib import Path
 
 from ..jobs.queue import Stage, StageContext, StageError
+from ..render import ffmpeg_bin
 from . import normalize, ytdlp
 
 
@@ -45,6 +46,17 @@ class IngestStage(Stage):
 
         def prog(fraction: float, message: str) -> None:
             ctx.emit(fraction, message)
+
+        # Probing the file needs ffmpeg/ffprobe, and a machine that has never
+        # had ffmpeg (most Macs) only got one at render time — after ingest,
+        # transcription and scoring had already failed on it. Fetch the
+        # static build now; a no-op when a caption-capable one already exists.
+        ffmpeg_bin.ensure_capable(progress=prog)
+        if not ffmpeg_bin.available():
+            raise StageError(
+                "publikclip needs ffmpeg and could not find or download one. "
+                "Check your internet connection and try again."
+            )
 
         heatmap = None
         title = None

@@ -96,6 +96,14 @@ def supports_captions() -> bool:
     return resolve()[1]
 
 
+def available() -> bool:
+    """Whether any ffmpeg (captions or not) can be run. resolve() falls back
+    to the bare name "ffmpeg" when nothing was found, so check that it is a
+    real file or on PATH rather than trusting the string."""
+    path = ffmpeg()
+    return os.path.exists(path) or shutil.which(path) is not None
+
+
 def _download(url: str, dest: Path) -> bool:
     import httpx
 

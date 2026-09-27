@@ -28,6 +28,7 @@ from typing import Callable
 import httpx
 
 from .. import config
+from ..render import ffmpeg_bin
 
 ProgressFn = Callable[[float, str], None]  # (fraction 0..1 or -1, message)
 
@@ -243,7 +244,11 @@ _PCT_RE = re.compile(r"\[download\]\s+([\d.]+)%")
 
 def download(url: str, out_path: Path, progress: ProgressFn) -> None:
     bin_path = ensure_ytdlp(progress)
-    ffmpeg = shutil.which("ffmpeg")
+    # The ffmpeg publikclip resolved, not whatever a login shell's PATH holds:
+    # a desktop launch has neither Homebrew nor the fetched static build on it.
+    ffmpeg = ffmpeg_bin.ffmpeg()
+    if not os.path.isabs(ffmpeg):
+        ffmpeg = shutil.which(ffmpeg)
     args = [
         "-f", DOWNLOAD_FORMAT,
         "--merge-output-format", "mp4",

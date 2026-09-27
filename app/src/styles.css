@@ -299,9 +299,10 @@ body {
   margin-bottom: 26px;
   letter-spacing: -0.01em;
 }
-.input-row { display: flex; gap: 12px; max-width: 780px; }
+.input-row { display: flex; gap: 12px; max-width: 780px; flex-wrap: wrap; }
 .input-row input {
-  flex: 1;
+  flex: 1 1 260px;
+  min-width: 0;
   font-family: var(--mono);
   font-size: 14px;
   background: var(--panel);
@@ -313,6 +314,35 @@ body {
   transition: border-color 0.2s;
 }
 .input-row input:focus { border-bottom-color: var(--amber); }
+.input-row .btn-secondary {
+  font-family: var(--display);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  padding: 0 22px;
+  white-space: nowrap;
+}
+.input-row .btn-secondary:hover:not(:disabled) { border-color: var(--amber); color: var(--amber); }
+.input-notice { margin-top: 12px; max-width: 780px; font-size: 12px; color: var(--amber); }
+
+/* shown while a file is dragged over the window */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(13, 14, 18, 0.82);
+  border: 2px dashed var(--amber);
+  margin: 14px;
+  pointer-events: none;
+}
+.drop-overlay-text {
+  font-family: var(--display);
+  font-size: clamp(24px, 4vw, 44px);
+  letter-spacing: 0.02em;
+  color: var(--amber);
+}
 .run-options { display: flex; gap: 34px; margin-top: 20px; flex-wrap: wrap; }
 .opt-group { display: flex; align-items: center; gap: 6px; }
 .opt-label {
