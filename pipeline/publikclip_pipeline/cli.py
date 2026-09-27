@@ -63,6 +63,27 @@ def _emit_result(jsonl: bool, payload: dict) -> None:
         print(json.dumps(payload, indent=2))
 
 
+def _uv_binary() -> str:
+    """The uv that runs the one-time dependency sync.
+
+    A desktop launch (Finder, the Start menu) hands the app a bare PATH —
+    /usr/bin:/bin:/usr/sbin:/sbin on macOS — so a uv installed anywhere a
+    terminal would find it is invisible here, and looking it up by name is
+    exactly how a packaged app died on first run with `No such file or
+    directory: 'uv'`. The shell passes the uv it bundles as PUBLIKCLIP_UV;
+    `uv run` also exports its own path as UV; PATH is the last resort (dev
+    shells, CI).
+    """
+    import os
+    import shutil
+
+    for var in ("PUBLIKCLIP_UV", "UV"):
+        candidate = os.environ.get(var)
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return shutil.which("uv") or "uv"
+
+
 def _ensure_pipeline_deps(jsonl: bool, emit) -> tuple[bool, str | None]:
     """First-run bootstrap for the `pipeline` dependency-group (whisperx,
     torch-via-whisperx, opencv, speechbrain, ...).
@@ -78,7 +99,6 @@ def _ensure_pipeline_deps(jsonl: bool, emit) -> tuple[bool, str | None]:
     Returns (ok, error_message). On failure, error_message is the real
     stderr tail from `uv sync`, suitable for `_emit_result`.
     """
-    import shutil
     import subprocess
     from pathlib import Path
 
@@ -88,7 +108,7 @@ def _ensure_pipeline_deps(jsonl: bool, emit) -> tuple[bool, str | None]:
 
     emit("env", -1, "Installing pipeline dependencies (one-time setup)…")
     pipeline_dir = Path(__file__).resolve().parent.parent
-    uv_bin = shutil.which("uv") or "uv"
+    uv_bin = _uv_binary()
     try:
         proc = subprocess.run(
             # --frozen for the same reason main.rs passes it: in a packaged

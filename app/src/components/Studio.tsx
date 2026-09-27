@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
+import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { api } from '../api'
+import { VIDEO_EXTENSIONS, pickVideo } from '../files'
 import type { JobSummary, PublikStatus } from '../types'
 import KeyModal from './KeyModal'
 import { accountLink, balanceLine, claimState } from './PublikCard'
@@ -45,7 +48,65 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
   const [captions, setCaptions] = useState('classic')
   const [showKey, setShowKey] = useState(false)
   const [publik, setPublik] = useState<PublikStatus | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
   const pickedBrain = useRef(false)
+  // The drag-drop listener is registered once; it reads this instead of
+  // re-subscribing (and missing a drop) every time a run starts or ends.
+  const runningRef = useRef(running)
+  runningRef.current = running
+
+  const chooseFile = useCallback(async () => {
+    try {
+      const picked = await openFileDialog({
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Video', extensions: VIDEO_EXTENSIONS }]
+      })
+      if (typeof picked === 'string') {
+        setSource(picked)
+        setNotice(null)
+      }
+    } catch (err) {
+      setNotice(`Couldn't open the file picker: ${String(err)}`)
+    }
+  }, [])
+
+  // Tauri takes over file drops on the window, so the DOM never sees a
+  // `drop` with file paths — the webview's own drag-drop event is the only
+  // way to learn where the file is.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    let disposed = false
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const drag = event.payload
+        if (drag.type === 'enter' || drag.type === 'over') {
+          if (!runningRef.current) setDragging(true)
+        } else if (drag.type === 'leave') {
+          setDragging(false)
+        } else if (drag.type === 'drop') {
+          setDragging(false)
+          if (runningRef.current) return
+          const video = pickVideo(drag.paths)
+          if (video) {
+            setSource(video)
+            setNotice(null)
+          } else {
+            setNotice("That isn't a video file. Drop an MP4, MOV, MKV or WEBM.")
+          }
+        }
+      })
+      .then((stop) => {
+        if (disposed) stop()
+        else unlisten = stop
+      })
+      .catch(() => {})
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [])
 
   const refreshPublik = useCallback(() => {
     api.publikStatus().then(setPublik).catch(() => setPublik(null))
@@ -130,6 +191,11 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
       </aside>
 
       <main className="stage-area">
+        {dragging && (
+          <div className="drop-overlay" aria-hidden="true">
+            <span className="drop-overlay-text">DROP A VIDEO TO LOAD IT</span>
+          </div>
+        )}
         <section className="input-block">
           <h1 className="input-heading">
             FEED IT<span className="amber"> AN HOUR.</span>
@@ -137,11 +203,17 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
           <div className="input-row">
             <input
               value={source}
-              onChange={(e) => setSource(e.target.value)}
+              onChange={(e) => {
+                setSource(e.target.value)
+                setNotice(null)
+              }}
               onKeyDown={(e) => e.key === 'Enter' && source.trim() && !running && onRun(source.trim(), llm, captions)}
-              placeholder="YouTube URL or a path to a video file"
+              placeholder="Paste a YouTube URL, or drop a video here"
               disabled={running}
             />
+            <button className="btn-secondary" onClick={chooseFile} disabled={running}>
+              CHOOSE FILE
+            </button>
             <button
               className="btn-primary"
               onClick={() => onRun(source.trim(), llm, captions)}
@@ -150,6 +222,7 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
               {running ? 'WORKING' : 'CUT IT'}
             </button>
           </div>
+          {notice && <p className="input-notice mono">{notice}</p>}
           <div className="run-options">
             <div className="opt-group">
               <span className="opt-label">brain</span>
