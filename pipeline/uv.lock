@@ -1350,12 +1350,15 @@ wheels = [
 
 [[package]]
 name = "publikclip-pipeline"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "." }
 
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+]
+net = [
+    { name = "httpx" },
 ]
 pipeline = [
     { name = "httpx" },
@@ -1376,6 +1379,7 @@ pipeline = [
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8" }]
+net = [{ name = "httpx", specifier = ">=0.27" }]
 pipeline = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "librosa", specifier = ">=0.10" },

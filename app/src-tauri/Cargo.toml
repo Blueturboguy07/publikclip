@@ -1,6 +1,6 @@
 [package]
 name = "publikclip-app"
-version = "0.2.1"
+version = "0.2.2"
 description = "publikclip — long video in, scored vertical clips out"
 license = "AGPL-3.0-or-later"
 edition = "2021"
