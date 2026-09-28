@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import gc
 import os
+import subprocess
 import time
+import wave
 from pathlib import Path
 
 from .. import config
@@ -26,6 +28,56 @@ from ..jobs.queue import Stage, StageContext, StageError
 ASR_MODEL = "large-v3-turbo"
 COMPUTE_TYPE = "int8"
 BATCH_SIZE = 8
+SAMPLE_RATE = 16000  # whisperx.audio.SAMPLE_RATE
+
+
+def load_audio(path: Path):
+    """16 kHz mono float32 waveform — the array whisperx's transcribe/align
+    take — WITHOUT `whisperx.load_audio`.
+
+    That helper shells out to a bare ``ffmpeg`` on PATH. The packaged app's
+    sidecar inherits Finder's PATH (/usr/bin:/bin:/usr/sbin:/sbin), which
+    holds no ffmpeg, so on every real install this stage died with
+    ``FileNotFoundError(2, 'No such file or directory')`` right after
+    "Loading speech model…" — while every other stage went through
+    render/ffmpeg_bin and worked. Ingest already wrote the analysis wav as
+    16 kHz mono s16le, so the common case needs no decoder at all; anything
+    else is decoded by the SAME ffmpeg the rest of the pipeline resolved.
+    """
+    import numpy as np  # deferred: cli.py imports this module before deps exist
+
+    try:
+        with wave.open(str(path), "rb") as wav:
+            layout = (wav.getnchannels(), wav.getsampwidth(), wav.getframerate())
+            if layout == (1, 2, SAMPLE_RATE):
+                raw = wav.readframes(wav.getnframes())
+                return np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0
+    except (wave.Error, EOFError, OSError):
+        pass
+    return _decode_with_ffmpeg(path)
+
+
+def _decode_with_ffmpeg(path: Path):
+    """Same command line as whisperx.load_audio, same output — but the binary
+    is the one publikclip resolved, by absolute path, not whatever PATH has."""
+    import numpy as np
+
+    from ..render import ffmpeg_bin
+
+    cmd = [
+        ffmpeg_bin.ffmpeg(), "-nostdin", "-threads", "0", "-i", str(path),
+        "-f", "s16le", "-ac", "1", "-acodec", "pcm_s16le", "-ar", str(SAMPLE_RATE), "-",
+    ]
+    try:
+        out = subprocess.run(cmd, capture_output=True, check=True).stdout
+    except FileNotFoundError as err:
+        raise StageError(
+            "No ffmpeg found to decode the audio — re-run ingest so publikclip can fetch one."
+        ) from err
+    except subprocess.CalledProcessError as err:
+        tail = err.stderr.decode("utf-8", errors="replace")[-2000:]
+        raise StageError(f"ffmpeg could not decode the analysis audio: {tail}") from err
+    return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
 
 def _point_caches_at_home() -> None:
@@ -59,8 +111,8 @@ class AsrStage(Stage):
         model = whisperx.load_model(
             ASR_MODEL, device, compute_type=COMPUTE_TYPE, vad_method="silero"
         )
-        audio = whisperx.load_audio(str(audio_path))
-        duration = float(len(audio)) / 16000.0
+        audio = load_audio(audio_path)
+        duration = float(len(audio)) / SAMPLE_RATE
 
         ctx.emit(-1, "Transcribing…")
         result = model.transcribe(audio, batch_size=BATCH_SIZE)
