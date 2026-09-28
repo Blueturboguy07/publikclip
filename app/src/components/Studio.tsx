@@ -283,7 +283,7 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
             <div>
               <strong>publik API needs more balance.</strong>{' '}
               {st.message ?? (claimState(publik) === 'anonymous'
-                ? 'The free starter usage on this computer is used up.'
+                ? 'This computer has no publik balance. Link your publik account for a small free starter balance once, or add a plan or pack.'
                 : "This computer's publik balance is used up.")}
               <div className="publik-actions">
                 {topUp && (

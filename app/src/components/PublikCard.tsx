@@ -10,8 +10,9 @@ import type { PublikStatus } from '../types'
 
 export const PUBLIK_PRE_SETUP =
   'Scoring runs on publik API: no account, no key to paste. It is paid per use, ' +
-  'in dollars, from a publik balance. Setting it up shows your starting balance ' +
-  'and exactly how the price works — nothing is spent until you run a video.'
+  'in dollars, from a publik balance. Link your publik account once to get a ' +
+  'small free starter balance. Until you link, a scoring call needs a plan, a ' +
+  'pack, or your own key — and nothing is ever spent until you run a video.'
 
 export const PUBLIK_DATA_PATH =
   "Your transcript slices and a few low-res frames go through publik's servers " +
@@ -27,12 +28,13 @@ export function claimState(p: PublikStatus | null): 'anonymous' | 'claimed' {
   return p?.status?.claim_state ?? p?.claim_state ?? 'anonymous'
 }
 
-/** "publik API · $0.25 of free starter usage left" / "publik API · $3.12 left" */
+/** "publik API · $0.00" (nothing linked yet) / "publik API · $0.05 of free starter usage left" (the once-per-account starter, being spent) / "publik API · $3.12 left" */
 export function balanceLine(p: PublikStatus | null): string {
   const b = currentBalance(p)
   if (b == null) return 'publik API ready'
+  if (b === 0) return `publik API · ${dollars(b)}`
   const starter = p?.status?.starter_remaining_micros
-  if (claimState(p) === 'anonymous' && (starter == null || starter > 0)) {
+  if (starter != null && starter > 0) {
     return `publik API · ${dollars(b)} of free starter usage left`
   }
   return `publik API · ${dollars(b)} left`
