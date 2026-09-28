@@ -83,6 +83,13 @@ export interface SetupState {
 }
 
 /** publik_status: everything the UI shows about publik API — never the key. */
+export interface UpdateNotice {
+  current: string
+  latest: string | null
+  update_available: boolean
+  url: string
+}
+
 export interface PublikStatus {
   provisioned: boolean
   claim_state: 'anonymous' | 'claimed'

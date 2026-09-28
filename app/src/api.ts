@@ -1,5 +1,5 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
-import type {
+import type { UpdateNotice,
   AudioItem,
   AudioKeysStatus,
   JobResults,
@@ -42,6 +42,8 @@ export const api = {
   publikRefresh: () => invoke<PublikStatus>('publik_refresh'),
   publikProvision: () => invoke<PublikStatus>('publik_provision'),
   publikDisconnect: () => invoke<PublikStatus>('publik_disconnect'),
+  /** one GET to GitHub's latest release on launch; offline it says nothing */
+  checkUpdate: () => invoke<UpdateNotice>('check_update'),
   fileUrl: (path: string) => convertFileSrc(path),
 
   /* ---------- music / sfx library ---------- */

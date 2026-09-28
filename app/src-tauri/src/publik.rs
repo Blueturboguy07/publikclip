@@ -80,7 +80,7 @@ fn curl_get(url: &str, bearer: &str) -> Result<(u16, Value), String> {
 /// One gateway call through the system curl. A JSON body goes on stdin and a
 /// bearer key rides a curl config read from stdin — never argv, which is
 /// world-readable in `ps`. The status code arrives on the trailing line.
-fn curl_request(
+pub(crate) fn curl_request(
     method: &str,
     url: &str,
     bearer: Option<&str>,

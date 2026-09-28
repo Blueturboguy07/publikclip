@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 mod publik;
+mod update;
 
 pub(crate) fn home_dir() -> PathBuf {
     if let Ok(custom) = std::env::var("PUBLIKCLIP_HOME") {
@@ -649,6 +650,7 @@ fn main() {
             publik::publik_status,
             publik::publik_refresh,
             publik::publik_disconnect,
+            update::check_update,
             save_freesound_key,
             save_jamendo_key,
             audio_keys_status,

@@ -4,7 +4,7 @@ import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { api } from '../api'
 import { VIDEO_EXTENSIONS, pickVideo } from '../files'
-import type { JobSummary, PublikStatus } from '../types'
+import type { JobSummary, PublikStatus, UpdateNotice } from '../types'
 import KeyModal from './KeyModal'
 import { LINK_GATE_TITLE, LinkGateCard, accountLink, balanceLine, claimState, linkGate } from './PublikCard'
 
@@ -53,6 +53,14 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
   // true once GET /wallet has answered (or failed) this session: until then
   // an unlinked answer from the files on disk may just be stale
   const [walletChecked, setWalletChecked] = useState(false)
+  // A newer build exists (one GET on launch; offline this stays null).
+  const [update, setUpdate] = useState<UpdateNotice | null>(null)
+  useEffect(() => {
+    api
+      .checkUpdate()
+      .then((u) => setUpdate(u.update_available ? u : null))
+      .catch(() => {})
+  }, [])
   const pickedBrain = useRef(false)
   // The drag-drop listener is registered once; it reads this instead of
   // re-subscribing (and missing a drop) every time a run starts or ends.
@@ -154,6 +162,22 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
   return (
     <div className="studio">
       <div className="grain" />
+      {update && (
+        <section className="publik-banner update-banner">
+          <span className="led led-half" />
+          <div>
+            <strong>publikclip {update.latest} is out.</strong> You have {update.current}.
+            <div className="publik-actions">
+              <button className="btn-secondary" onClick={() => openUrl(update.url)}>
+                Download
+              </button>
+              <button className="btn-ghost" onClick={() => setUpdate(null)}>
+                Later
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
       {showKey && (
         <KeyModal
           onClose={() => {
