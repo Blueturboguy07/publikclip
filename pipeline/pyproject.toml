@@ -1,6 +1,6 @@
 [project]
 name = "publikclip-pipeline"
-version = "0.2.1"
+version = "0.2.2"
 description = "publikclip processing pipeline: long video in, scored vertical clips out"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.12,<3.13"
@@ -34,8 +34,16 @@ dev = [
 # stdout — instead of `uv run`'s own opaque pre-launch sync silently
 # blocking the process, with its real error going only to stderr, before
 # the app is even allowed to start).
-pipeline = [
+# The handful of small pure-Python packages the Library and Loop screens'
+# commands (`audio …`, `ig …`) import at load. Synced on demand by cli.py's
+# `_ensure_net_deps()` — seconds, not the pipeline group's multi-GB pull —
+# so those screens work on a fresh install before the first clip job. The
+# pipeline group includes it, so one marker covers both once a job has run.
+net = [
     "httpx>=0.27",
+]
+pipeline = [
+    { include-group = "net" },
     "librosa>=0.10",
     "numba>=0.60",
     "onnxruntime>=1.20",

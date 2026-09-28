@@ -112,3 +112,60 @@ def test_ingest_says_so_when_no_ffmpeg_can_be_found_or_fetched(tmp_path, monkeyp
     )
     with pytest.raises(queue.StageError, match="ffmpeg"):
         ingest_stage.IngestStage().run(ctx)
+
+
+def test_net_sync_uses_the_bundled_uv_and_never_uninstalls_the_pipeline_group(tmp_path, monkeypatch):
+    """The other field failure on the same fresh install: opening the Loop
+    screen before any job ran died with `ig tool produced no JSON:
+    Traceback … No module named 'httpx'`."""
+    bundled = _fake_uv(tmp_path)
+    monkeypatch.setenv("PUBLIKCLIP_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PUBLIKCLIP_UV", bundled)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    seen: dict = {}
+
+    def fake_run(args, **_kwargs):
+        seen["args"] = args
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert cli._ensure_net_deps(False, lambda *_: None) == (True, None)
+    assert seen["args"][0] == bundled
+    # --inexact: a `uv sync` without it makes the env match the requested
+    # groups exactly, which would rip the multi-GB pipeline group back out.
+    assert seen["args"][-5:] == ["sync", "--frozen", "--inexact", "--group", "net"]
+
+
+def test_net_sync_is_skipped_once_the_pipeline_group_is_in(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".pipeline_deps_synced").write_text("ok")
+    monkeypatch.setenv("PUBLIKCLIP_HOME", str(home))
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: pytest.fail("synced anyway"))
+    assert cli._ensure_net_deps(False, lambda *_: None) == (True, None)
+
+
+@pytest.mark.parametrize("argv", [["ig", "overview"], ["audio", "list", "--json"]])
+def test_loop_and_library_commands_answer_json_when_the_net_sync_fails(argv, tmp_path, monkeypatch, capsys):
+    import json
+
+    monkeypatch.setenv("PUBLIKCLIP_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(cli, "_ensure_net_deps", lambda *_: (False, "no network"))
+    assert cli.main(argv) == 1
+    last = capsys.readouterr().out.strip().splitlines()[-1]
+    payload = json.loads(last)
+    assert payload["ok"] is False
+    assert "no network" in payload["error"]
+
+
+@pytest.mark.parametrize("argv", [["ig", "overview"], ["audio", "list", "--json"]])
+def test_loop_and_library_commands_sync_net_deps_before_importing(argv, tmp_path, monkeypatch, capsys):
+    import json
+
+    monkeypatch.setenv("PUBLIKCLIP_HOME", str(tmp_path / "home"))
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "_ensure_net_deps", lambda *_: calls.append("net") or (True, None))
+    assert cli.main(argv) == 0
+    assert calls == ["net"]
+    json.loads(capsys.readouterr().out.strip().splitlines()[-1])

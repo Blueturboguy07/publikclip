@@ -84,6 +84,49 @@ def _uv_binary() -> str:
     return shutil.which("uv") or "uv"
 
 
+def _ensure_group_deps(
+    group: str, marker_name: str, exact: bool, emit, message: str
+) -> tuple[bool, str | None]:
+    """Sync one uv dependency-group into the app's env, once, as a reportable
+    step. `exact=False` passes `--inexact`, so syncing a small group never
+    uninstalls a bigger one that is already in (uv sync makes the env match
+    exactly by default)."""
+    import subprocess
+    from pathlib import Path
+
+    marker = config.home_dir() / marker_name
+    if marker.exists():
+        return True, None
+
+    emit("env", -1, message)
+    pipeline_dir = Path(__file__).resolve().parent.parent
+    uv_bin = _uv_binary()
+    label = f"`uv sync --group {group}`"
+    # --frozen for the same reason main.rs passes it: in a packaged build
+    # pipeline_dir is inside the app bundle, and re-locking would write
+    # uv.lock there. UV_PROJECT_ENVIRONMENT (set by the shell that spawned
+    # us) keeps the venv itself out too.
+    args = [uv_bin, "--directory", str(pipeline_dir), "sync", "--frozen"]
+    if not exact:
+        args.append("--inexact")
+    args += ["--group", group]
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=3600)
+    except Exception as err:  # noqa: BLE001 — surface, don't crash silently
+        return False, f"could not start {label}: {err}"
+
+    if proc.returncode != 0:
+        tail = "\n".join((proc.stderr or proc.stdout or "").strip().splitlines()[-12:])
+        return False, tail or f"{label} exited {proc.returncode}"
+
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("ok")
+    except OSError:
+        pass  # best-effort cache; a missing marker just re-syncs (fast, no-op) next run
+    return True, None
+
+
 def _ensure_pipeline_deps(jsonl: bool, emit) -> tuple[bool, str | None]:
     """First-run bootstrap for the `pipeline` dependency-group (whisperx,
     torch-via-whisperx, opencv, speechbrain, ...).
@@ -99,12 +142,52 @@ def _ensure_pipeline_deps(jsonl: bool, emit) -> tuple[bool, str | None]:
     Returns (ok, error_message). On failure, error_message is the real
     stderr tail from `uv sync`, suitable for `_emit_result`.
     """
-    import subprocess
-    from pathlib import Path
+    del jsonl  # progress goes through `emit`, which already knows the mode
+    return _ensure_group_deps(
+        "pipeline",
+        ".pipeline_deps_synced",
+        True,
+        emit,
+        "Installing pipeline dependencies (one-time setup)…",
+    )
 
-    marker = config.home_dir() / ".pipeline_deps_synced"
-    if marker.exists():
+
+def _ensure_net_deps(jsonl: bool, emit) -> tuple[bool, str | None]:
+    """The `net` group (httpx) for the commands the Library and Loop screens
+    run — `audio …` and `ig …` — whose modules import httpx at load.
+
+    Before the first clip job has run `_ensure_pipeline_deps`, httpx is not
+    in the env at all, and opening either screen on a fresh install died with
+    `ig tool produced no JSON: Traceback … No module named 'httpx'`. This
+    group is a few small pure-Python packages, so syncing it on demand costs
+    seconds, not the pipeline group's multi-GB download. `--inexact` (see
+    `_ensure_group_deps`) is what keeps this sync from uninstalling the
+    pipeline group once that is in; the pipeline group includes `net`, so
+    its marker means this one is already satisfied.
+    """
+    del jsonl
+    if (config.home_dir() / ".pipeline_deps_synced").exists():
         return True, None
+    return _ensure_group_deps(
+        "net",
+        ".net_deps_synced",
+        False,
+        emit,
+        "Installing the app's network library (one-time setup)…",
+    )
+
+
+def _net_ready(args: argparse.Namespace) -> bool:
+    """Gate for `ig` and `audio`: run the one-time `net` sync first and, when
+    it cannot happen, answer with the one JSON line the shell's ig_tool /
+    edit_tool contract expects instead of a traceback."""
+    ok, err = _ensure_net_deps(args.jsonl, _progress_printer(args.jsonl))
+    if ok:
+        return True
+    message = f"Couldn't install the app's network library (one-time setup): {err}"
+    print(json.dumps({"ok": False, "error": message}), flush=True)
+    return False
+
 
     emit("env", -1, "Installing pipeline dependencies (one-time setup)…")
     pipeline_dir = Path(__file__).resolve().parent.parent
@@ -290,6 +373,8 @@ def cmd_edit(args: argparse.Namespace) -> int:
 
 
 def cmd_ig(args: argparse.Namespace) -> int:
+    if not _net_ready(args):
+        return 1
     from .insights import calibration, instagram
 
     if args.ig_cmd == "connect":
@@ -387,6 +472,8 @@ def cmd_audio(args: argparse.Namespace) -> int:
     import/remove/tag/fetch are always JSON (edit_tool's convention);
     list/search default to human-readable lines, --json switches them
     over for the app."""
+    if not _net_ready(args):
+        return 1
     from dataclasses import asdict
 
     from .audio_library import library
