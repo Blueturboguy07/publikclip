@@ -1100,3 +1100,9 @@ body {
   cursor: pointer;
 }
 .btn-link:hover { text-decoration: underline; }
+
+/* the link card: stands in for the run control until this computer is linked */
+.publik-gate p { color: var(--dim); margin-top: 6px; }
+.publik-gate .btn-primary { font-size: 13px; padding: 10px 18px; }
+.publik-gate-inline { margin-top: 14px; }
+.ob-required { font-size: 12px !important; color: var(--faint) !important; margin-top: 8px; }

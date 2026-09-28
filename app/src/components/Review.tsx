@@ -38,6 +38,22 @@ const SIGNAL_LABELS: Record<string, string> = {
   visual: 'visual pass'
 }
 
+/** Always name the brain that scored the job: a job scored on the user's own
+ *  key must never read like a publik API job. */
+function scoredBy(score: JobResults['score']): string {
+  const model = score?.model ?? '—'
+  switch (score?.llm_mode) {
+    case 'publik':
+      return `scored by ${model} via publik API`
+    case 'gemini':
+      return `scored by ${model} via my Gemini key`
+    case 'ollama':
+      return `scored by ${model} locally (Ollama) · LOCAL ESTIMATE`
+    default:
+      return `scored by ${model}`
+  }
+}
+
 function fmtTime(t: number): string {
   const m = Math.floor(t / 60)
   const s = Math.floor(t % 60)
@@ -95,8 +111,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
         <div className="review-title-block">
           <h1 className="review-title">{results.ingest?.title ?? results.job_id}</h1>
           <p className="review-sub mono">
-            {outputs.length} clips · scored by {results.score?.model ?? '—'} ·{' '}
-            {results.score?.llm_mode === 'ollama' ? 'LOCAL ESTIMATE' : 'standard confidence'} ·{' '}
+            {outputs.length} clips · {scoredBy(results.score)} ·{' '}
             {results.candidates?.heatmap_present ? 'replay heatmap in play' : 'no public heatmap'}
           </p>
         </div>

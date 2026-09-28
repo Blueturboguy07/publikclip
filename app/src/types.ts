@@ -90,7 +90,10 @@ export interface PublikStatus {
   add_credit_url: string | null
   /** from POST /installs, shown verbatim — the app never writes its own */
   disclosure: { version?: number; cost?: string; data_path?: string } | null
-  /** ~/.publikclip/publik-status.json, rewritten by the pipeline after every call */
+  /** publik_refresh only: true when the gateway answered GET /wallet */
+  refreshed?: boolean
+  /** ~/.publikclip/publik-status.json, rewritten by the pipeline after every
+   *  call and by publik_refresh from GET /wallet */
   status: {
     balance_micros?: number | null
     starter_micros?: number | null
@@ -100,6 +103,7 @@ export interface PublikStatus {
     needs_credit?: boolean
     disconnected?: boolean
     reprovision?: boolean
+    error_type?: string | null
     top_up_url?: string | null
     message?: string | null
     updated_at?: number

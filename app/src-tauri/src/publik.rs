@@ -67,28 +67,52 @@ pub(crate) fn merge_secret(field: &str, value: Value) -> Result<(), String> {
     write_secrets_at(&secrets_path(), &current)
 }
 
-/// POST against the gateway via curl. The JSON body goes on stdin and a
+/// POST against the gateway via curl.
+fn curl_json(url: &str, bearer: Option<&str>, body: &Value) -> Result<(u16, Value), String> {
+    curl_request("POST", url, bearer, Some(body), 20)
+}
+
+/// GET against the gateway via curl, with this computer's key.
+fn curl_get(url: &str, bearer: &str) -> Result<(u16, Value), String> {
+    curl_request("GET", url, Some(bearer), None, 10)
+}
+
+/// One gateway call through the system curl. A JSON body goes on stdin and a
 /// bearer key rides a curl config read from stdin — never argv, which is
 /// world-readable in `ps`. The status code arrives on the trailing line.
-fn curl_json(url: &str, bearer: Option<&str>, body: &Value) -> Result<(u16, Value), String> {
+fn curl_request(
+    method: &str,
+    url: &str,
+    bearer: Option<&str>,
+    body: Option<&Value>,
+    timeout_secs: u32,
+) -> Result<(u16, Value), String> {
+    let timeout = timeout_secs.to_string();
     let mut cmd = quiet_command("curl");
     cmd.args([
-        "-sS", "-m", "20", "-X", "POST", url,
-        "-H", "content-type: application/json",
+        "-sS", "-m", &timeout, "-X", method, url,
         "-H", "accept: application/json",
         "-w", "\n%{http_code}",
     ]);
-    let stdin_payload = match bearer {
-        // Only the empty-body revoke call carries a key; its body is not
-        // secret, so the stdin slot goes to the header.
-        Some(key) => {
+    if body.is_some() {
+        cmd.args(["-H", "content-type: application/json"]);
+    }
+    let stdin_payload = match (bearer, body) {
+        // A keyed call's body is never secret (the revoke call's is empty),
+        // so the stdin slot goes to the header.
+        (Some(key), Some(body)) => {
             cmd.args(["-K", "-", "--data-binary", &body.to_string()]);
             format!("header = \"authorization: Bearer {key}\"\n")
         }
-        None => {
+        (Some(key), None) => {
+            cmd.args(["-K", "-"]);
+            format!("header = \"authorization: Bearer {key}\"\n")
+        }
+        (None, Some(body)) => {
             cmd.args(["--data-binary", "@-"]);
             body.to_string()
         }
+        (None, None) => String::new(),
     };
     let mut child = cmd
         .stdin(Stdio::piped())
@@ -198,6 +222,97 @@ pub(crate) fn status_from_mint(res: &Value) -> Value {
     })
 }
 
+/// Integer micros from a JSON number (tolerates a float-encoded integer).
+fn micros(v: &Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_f64().map(|f| f.round() as i64))
+}
+
+/// publik-status.json after a 200 GET /wallet. Merged over the previous file,
+/// like the pipeline's own writes: fields the wallet does not carry
+/// (starter_micros, last_charge_micros, week_*) keep their last value. None
+/// when the body is not a wallet (no balance, or an unknown claim state).
+pub(crate) fn status_from_wallet(prior: &Value, wallet: &Value, now: f64) -> Option<Value> {
+    let balance = micros(&wallet["balance_micros"])?;
+    let claim_state = wallet["claim_state"]
+        .as_str()
+        .filter(|s| *s == "anonymous" || *s == "claimed")?;
+    let mut status = if prior.is_object() { prior.clone() } else { json!({}) };
+    status["balance_micros"] = json!(balance);
+    status["claim_state"] = json!(claim_state);
+    // no starter block = no starter left to spend
+    status["starter_remaining_micros"] = json!(micros(&wallet["starter"]["remaining_micros"]).unwrap_or(0));
+    status["top_up_url"] = wallet["top_up_url"].clone();
+    status["needs_credit"] = json!(balance == 0);
+    status["disconnected"] = json!(false);
+    status["updated_at"] = json!(now);
+    if let Some(obj) = status.as_object_mut() {
+        // a 402 message or a 401 flag from an earlier call is stale now
+        for stale in ["message", "reprovision", "error_type"] {
+            obj.remove(stale);
+        }
+    }
+    Some(status)
+}
+
+/// publik-status.json after GET /wallet answered 401/403: this computer's
+/// key no longer works. Same fields the pipeline writes on that answer.
+pub(crate) fn status_after_auth_failure(prior: &Value, code: u16, res: &Value, now: f64) -> Value {
+    let mut status = if prior.is_object() { prior.clone() } else { json!({}) };
+    status["disconnected"] = json!(true);
+    status["reprovision"] = json!(code == 401 || res["error"]["reprovision"] == json!(true));
+    status["error_type"] = res["error"]["type"].clone();
+    status["updated_at"] = json!(now);
+    status
+}
+
+/// secrets.json's publik block after a 200 GET /wallet: the server's claim
+/// state, the live claim link while anonymous (the wallet re-issues an
+/// expired code), and no claim link once claimed.
+pub(crate) fn block_from_wallet(block: &Value, wallet: &Value) -> Value {
+    let mut next = block.clone();
+    let claim_state = wallet["claim_state"].as_str().unwrap_or("anonymous");
+    next["claim_state"] = json!(claim_state);
+    if claim_state == "claimed" {
+        next["claim_url"] = Value::Null;
+    } else if let Some(url) = wallet["claim_url"].as_str().filter(|u| !u.is_empty()) {
+        next["claim_url"] = json!(url);
+    }
+    if let Some(url) = wallet["add_credit_url"].as_str().filter(|u| !u.is_empty()) {
+        next["add_credit_url"] = json!(url);
+    }
+    next
+}
+
+/// Founder rule (2026-09-28): publikclip runs only on a computer whose
+/// publik API install is linked to a publik account, whichever brain scores.
+/// `status` is publik_status()'s shape.
+pub(crate) fn is_linked(status: &Value) -> bool {
+    status["provisioned"] == json!(true)
+        && status["claim_state"] == json!("claimed")
+        && status["status"]["disconnected"] != json!(true)
+}
+
+pub(crate) const LINK_REQUIRED: &str =
+    "Link your publik account to start. publikclip runs on a linked publik account.";
+
+/// The backstop behind the Studio's link card: run_job and resume_job refuse
+/// to start on an unlinked computer. Reads the files publik_refresh keeps
+/// current; no network.
+pub(crate) fn require_linked() -> Result<(), String> {
+    if is_linked(&publik_status()?) {
+        Ok(())
+    } else {
+        Err(LINK_REQUIRED.into())
+    }
+}
+
+fn now_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 fn new_install_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -276,6 +391,44 @@ pub fn publik_status() -> Result<Value, String> {
         "disclosure": block["disclosure"],
         "status": status,
     }))
+}
+
+/// Ask the gateway for this computer's wallet (GET /wallet) and rewrite the
+/// status file from it, so the claim state and balance on screen are the
+/// server's — not what was true at mint or at the last scoring call. A 401/403
+/// marks the key disconnected. Offline or any other answer leaves both files
+/// alone. Returns publik_status() plus `refreshed`: whether the server answered.
+#[tauri::command]
+pub async fn publik_refresh() -> Result<Value, String> {
+    let mut secrets = read_secrets();
+    let block = secrets["publik"].clone();
+    let mut refreshed = false;
+    if let Some(key) = block["key"].as_str().filter(|k| !k.is_empty()) {
+        let base = block["base_url"].as_str().unwrap_or(PUBLIK_API).trim_end_matches('/');
+        let prior = read_json(&status_path());
+        match curl_get(&format!("{base}/wallet"), key) {
+            Ok((200, wallet)) => {
+                if let Some(status) = status_from_wallet(&prior, &wallet, now_secs()) {
+                    let next = block_from_wallet(&block, &wallet);
+                    if next != block {
+                        secrets["publik"] = next;
+                        write_secrets_at(&secrets_path(), &secrets)?;
+                    }
+                    let _ = fs::write(status_path(), status.to_string());
+                    refreshed = true;
+                }
+            }
+            Ok((code @ (401 | 403), res)) => {
+                let status = status_after_auth_failure(&prior, code, &res, now_secs());
+                let _ = fs::write(status_path(), status.to_string());
+                refreshed = true;
+            }
+            _ => {}
+        }
+    }
+    let mut out = publik_status()?;
+    out["refreshed"] = json!(refreshed);
+    Ok(out)
 }
 
 /// "Disconnect publik API": self-revoke, forget the key, keep install_id so a
@@ -432,6 +585,120 @@ mod tests {
             assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         }
         let _ = fs::remove_dir_all(dir);
+    }
+
+    // GET /wallet bodies (lib/publik-api/wallet.ts walletBody): anonymous
+    // carries a live claim code; claimed carries none.
+    fn wallet_anonymous() -> Value {
+        json!({
+            "claim_state": "anonymous",
+            "balance_micros": 0,
+            "starter": Value::Null,
+            "week": {"used_micros": 0},
+            "claim_code": "HK7F-2QWD",
+            "claim_url": "https://publikhq.com/claim/NEW1-CODE",
+            "add_credit_url": "https://publikhq.com/dashboard/api/add",
+            "top_up_url": "https://publikhq.com/claim/NEW1-CODE",
+            "base_url": "https://publikhq.com/api/v1"
+        })
+    }
+
+    fn wallet_claimed(balance: i64, starter_left: i64) -> Value {
+        json!({
+            "claim_state": "claimed",
+            "balance_micros": balance,
+            "starter": {"remaining_micros": starter_left, "expires_at": Value::Null},
+            "week": {"used_micros": 0},
+            "claim_code": Value::Null,
+            "claim_url": Value::Null,
+            "add_credit_url": "https://publikhq.com/dashboard/api/add",
+            "top_up_url": "https://publikhq.com/dashboard/api/add",
+            "base_url": "https://publikhq.com/api/v1"
+        })
+    }
+
+    #[test]
+    fn wallet_status_for_a_linked_computer_with_the_starter() {
+        let prior = status_from_mint(&mint_fixture(json!("pk_live_x")));
+        let s = status_from_wallet(&prior, &wallet_claimed(50000, 50000), 1.0).unwrap();
+        assert_eq!(s["claim_state"], "claimed");
+        assert_eq!(s["balance_micros"], 50000);
+        assert_eq!(s["starter_remaining_micros"], 50000);
+        assert_eq!(s["top_up_url"], "https://publikhq.com/dashboard/api/add");
+        assert_eq!(s["needs_credit"], false);
+        assert_eq!(s["disconnected"], false);
+        assert_eq!(s["starter_micros"], 0, "starter_micros stays what the mint said");
+    }
+
+    #[test]
+    fn wallet_status_needs_credit_only_at_zero_balance() {
+        let s = status_from_wallet(&json!({}), &wallet_anonymous(), 1.0).unwrap();
+        assert_eq!(s["claim_state"], "anonymous");
+        assert_eq!(s["balance_micros"], 0);
+        assert_eq!(s["starter_remaining_micros"], 0, "no starter block = none left");
+        assert_eq!(s["needs_credit"], true);
+        let used_up = status_from_wallet(&json!({}), &wallet_claimed(0, 0), 1.0).unwrap();
+        assert_eq!(used_up["needs_credit"], true);
+        let paid = status_from_wallet(&json!({}), &wallet_claimed(3_120_000, 0), 1.0).unwrap();
+        assert_eq!(paid["needs_credit"], false);
+    }
+
+    #[test]
+    fn wallet_status_clears_stale_call_state_and_keeps_the_rest() {
+        let prior = json!({
+            "balance_micros": 0, "claim_state": "anonymous", "needs_credit": true,
+            "disconnected": true, "reprovision": true, "error_type": "key_revoked",
+            "message": "old 402 line", "last_charge_micros": 1200, "week_used_micros": 9
+        });
+        let s = status_from_wallet(&prior, &wallet_claimed(50000, 50000), 2.0).unwrap();
+        assert_eq!(s["disconnected"], false);
+        assert_eq!(s["needs_credit"], false);
+        assert!(s.get("message").is_none() && s.get("reprovision").is_none() && s.get("error_type").is_none());
+        assert_eq!(s["last_charge_micros"], 1200);
+        assert_eq!(s["week_used_micros"], 9);
+        assert_eq!(s["updated_at"], 2.0);
+    }
+
+    #[test]
+    fn wallet_status_rejects_a_body_that_is_not_a_wallet() {
+        assert!(status_from_wallet(&json!({}), &json!({}), 1.0).is_none());
+        assert!(status_from_wallet(&json!({}), &json!({"balance_micros": 5}), 1.0).is_none());
+        assert!(status_from_wallet(&json!({}), &json!({"balance_micros": 5, "claim_state": "weird"}), 1.0).is_none());
+    }
+
+    #[test]
+    fn wallet_block_drops_the_claim_link_once_claimed() {
+        let block = block_from_mint(&mint_fixture(json!("pk_live_x")), &json!(null), "i").unwrap();
+        let claimed = block_from_wallet(&block, &wallet_claimed(50000, 50000));
+        assert_eq!(claimed["claim_state"], "claimed");
+        assert!(claimed["claim_url"].is_null());
+        assert_eq!(claimed["key"], "pk_live_x", "the key is never touched");
+        let anon = block_from_wallet(&block, &wallet_anonymous());
+        assert_eq!(anon["claim_state"], "anonymous");
+        assert_eq!(anon["claim_url"], "https://publikhq.com/claim/NEW1-CODE", "re-issued code wins");
+    }
+
+    #[test]
+    fn wallet_auth_failure_marks_disconnected() {
+        let prior = json!({"balance_micros": 50000, "claim_state": "claimed"});
+        let res = json!({"error": {"type": "key_revoked", "message": "revoked"}});
+        let s = status_after_auth_failure(&prior, 401, &res, 3.0);
+        assert_eq!(s["disconnected"], true);
+        assert_eq!(s["reprovision"], true);
+        assert_eq!(s["error_type"], "key_revoked");
+        assert_eq!(s["balance_micros"], 50000);
+        let s403 = status_after_auth_failure(&prior, 403, &json!({"error": {"type": "install_revoked"}}), 3.0);
+        assert_eq!(s403["reprovision"], false);
+    }
+
+    #[test]
+    fn linked_means_provisioned_claimed_and_connected() {
+        let ok = json!({"provisioned": true, "claim_state": "claimed", "status": {"disconnected": false}});
+        assert!(is_linked(&ok));
+        assert!(is_linked(&json!({"provisioned": true, "claim_state": "claimed", "status": {}})));
+        assert!(!is_linked(&json!({"provisioned": false, "claim_state": "claimed", "status": {}})));
+        assert!(!is_linked(&json!({"provisioned": true, "claim_state": "anonymous", "status": {}})));
+        assert!(!is_linked(&json!({"provisioned": true, "claim_state": "claimed", "status": {"disconnected": true}})));
     }
 
     #[test]

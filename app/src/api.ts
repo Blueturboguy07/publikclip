@@ -36,7 +36,10 @@ export const api = {
     invoke<{ ok: boolean }>('ig_tool', { args: ['unlink', mediaId] }),
   igReject: (mediaId: string, jobId: string, clip: number) =>
     invoke<{ ok: boolean }>('ig_tool', { args: ['reject', mediaId, jobId, String(clip)] }),
+  /** cheap: the files on disk, no network */
   publikStatus: () => invoke<PublikStatus>('publik_status'),
+  /** GET /wallet, rewrites the status file from the server's answer; offline returns the files */
+  publikRefresh: () => invoke<PublikStatus>('publik_refresh'),
   publikProvision: () => invoke<PublikStatus>('publik_provision'),
   publikDisconnect: () => invoke<PublikStatus>('publik_disconnect'),
   fileUrl: (path: string) => convertFileSrc(path),

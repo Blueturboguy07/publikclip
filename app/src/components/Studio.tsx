@@ -6,7 +6,7 @@ import { api } from '../api'
 import { VIDEO_EXTENSIONS, pickVideo } from '../files'
 import type { JobSummary, PublikStatus } from '../types'
 import KeyModal from './KeyModal'
-import { accountLink, balanceLine, claimState } from './PublikCard'
+import { LINK_GATE_TITLE, LinkGateCard, accountLink, balanceLine, claimState, linkGate } from './PublikCard'
 
 const BRAINS: [string, string][] = [
   ['publik', 'publik API'],
@@ -50,6 +50,9 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
   const [publik, setPublik] = useState<PublikStatus | null>(null)
   const [dragging, setDragging] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  // true once GET /wallet has answered (or failed) this session: until then
+  // an unlinked answer from the files on disk may just be stale
+  const [walletChecked, setWalletChecked] = useState(false)
   const pickedBrain = useRef(false)
   // The drag-drop listener is registered once; it reads this instead of
   // re-subscribing (and missing a drop) every time a run starts or ends.
@@ -108,28 +111,42 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
     }
   }, [])
 
+  // Ask the server (GET /wallet): the files on disk only change at mint or
+  // after a publik API call, so a computer linked since then still read
+  // "anonymous". Offline, the Rust side returns the files unchanged.
   const refreshPublik = useCallback(() => {
-    api.publikStatus().then(setPublik).catch(() => setPublik(null))
+    api
+      .publikRefresh()
+      .catch(() => api.publikStatus())
+      .then(setPublik)
+      .catch(() => {})
+      .finally(() => setWalletChecked(true))
   }, [])
 
-  // Initial brain from what this computer actually has: publik API if set
-  // up, else the user's own Gemini key, else Ollama. Only once — after that
-  // the picker is the user's.
+  // First paint from the files (no network); the refresh below replaces it.
   useEffect(() => {
-    Promise.all([api.publikStatus().catch(() => null), api.setupState().catch(() => null)]).then(
-      ([p, setup]) => {
-        setPublik(p)
-        if (pickedBrain.current) return
-        setLlm(p?.provisioned ? 'publik' : setup?.has_gemini_key ? 'gemini' : 'ollama')
-      }
-    )
+    api
+      .publikStatus()
+      .then((p) => setPublik((cur) => cur ?? p))
+      .catch(() => {})
   }, [])
 
-  // A run just ended (maybe on a 402): re-read the balance line / banner.
+  // On mount and after every run (maybe ended on a 402): ask the server.
   useEffect(() => {
     if (!running) refreshPublik()
   }, [running, refreshPublik])
 
+  // Default brain is publik API once this computer is linked — never the
+  // user's own Gemini key just because one is saved (a job once started 18 s
+  // before the key finished minting and billed that key directly). Once the
+  // user picks a brain this session, the picker is theirs.
+  const gate = linkGate(publik)
+  const linked = gate === 'linked'
+  useEffect(() => {
+    if (linked && !pickedBrain.current) setLlm('publik')
+  }, [linked])
+
+  const canRun = linked && !running && source.trim() !== ''
   const st = publik?.status
   const link = accountLink(publik)
   const topUp = st?.top_up_url ?? link?.url ?? null
@@ -158,8 +175,8 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
               key={job.id}
               className={`rail-job ${job.rendered ? '' : 'partial'}`}
               onClick={() => (job.rendered ? onOpenJob(job.id) : onResume(job.id))}
-              disabled={running}
-              title={job.rendered ? 'open results' : 'resume from checkpoint'}
+              disabled={running || (!job.rendered && !linked)}
+              title={job.rendered ? 'open results' : linked ? 'resume from checkpoint' : LINK_GATE_TITLE}
             >
               <span className={`led ${job.rendered ? 'led-on' : 'led-half'}`} />
               <span className="rail-job-title">{job.title ?? job.id}</span>
@@ -207,7 +224,7 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
                 setSource(e.target.value)
                 setNotice(null)
               }}
-              onKeyDown={(e) => e.key === 'Enter' && source.trim() && !running && onRun(source.trim(), llm, captions)}
+              onKeyDown={(e) => e.key === 'Enter' && canRun && onRun(source.trim(), llm, captions)}
               placeholder="Paste a YouTube URL, or drop a video here"
               disabled={running}
             />
@@ -217,12 +234,20 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
             <button
               className="btn-primary"
               onClick={() => onRun(source.trim(), llm, captions)}
-              disabled={running || !source.trim()}
+              disabled={!canRun}
+              title={linked ? undefined : LINK_GATE_TITLE}
             >
               {running ? 'WORKING' : 'CUT IT'}
             </button>
           </div>
           {notice && <p className="input-notice mono">{notice}</p>}
+          {!linked && !running && (
+            <LinkGateCard
+              publik={publik}
+              checking={!walletChecked && gate !== 'off'}
+              onChange={setPublik}
+            />
+          )}
           <div className="run-options">
             <div className="opt-group">
               <span className="opt-label">brain</span>
@@ -277,41 +302,18 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
           </section>
         )}
 
-        {publik?.provisioned && st?.needs_credit && (
+        {linked && st?.needs_credit && (
           <section className="publik-banner">
             <span className="led led-half" />
             <div>
               <strong>publik API needs more balance.</strong>{' '}
-              {st.message ?? (claimState(publik) === 'anonymous'
-                ? 'This computer has no publik balance. Linking your publik account gives $0.05 of free use, once; a plan or pack adds more.'
-                : "This computer's publik balance is used up.")}
+              {st.message ?? "This computer's publik balance is used up."}
               <div className="publik-actions">
                 {topUp && (
                   <button className="btn-secondary publik-link" onClick={() => openUrl(topUp)}>
-                    {claimState(publik) === 'anonymous' ? 'Link this computer & pick a plan' : 'Add a plan or pack'}
+                    Add a plan or pack
                   </button>
                 )}
-                <button className="btn-ghost" onClick={() => setShowKey(true)}>
-                  Use my own key instead
-                </button>
-              </div>
-            </div>
-          </section>
-        )}
-
-        {st?.disconnected && (
-          <section className="publik-banner">
-            <span className="led led-half" />
-            <div>
-              <strong>publik API is disconnected on this computer.</strong> Its key no
-              longer works — reconnect to get a working one, or use your own key.
-              <div className="publik-actions">
-                <button
-                  className="btn-secondary"
-                  onClick={() => api.publikProvision().then(setPublik).catch(() => setShowKey(true))}
-                >
-                  Reconnect
-                </button>
                 <button className="btn-ghost" onClick={() => setShowKey(true)}>
                   Use my own key instead
                 </button>

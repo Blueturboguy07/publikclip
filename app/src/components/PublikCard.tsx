@@ -1,5 +1,6 @@
+import { useState } from 'react'
 import { openUrl } from '@tauri-apps/plugin-opener'
-import { dollars } from '../api'
+import { api, dollars } from '../api'
 import type { PublikStatus } from '../types'
 
 /**
@@ -68,5 +69,123 @@ export function PublikReady({ publik }: { publik: PublikStatus }) {
         </button>
       )}
     </div>
+  )
+}
+
+/**
+ * Founder rule (2026-09-28): no job starts until this computer's publik API
+ * install is linked to a publik account, whichever brain scores (publik API,
+ * my Gemini key, or Ollama). Mirrors publik::is_linked in the Rust shell,
+ * which refuses run_job/resume_job on the same condition.
+ */
+export type LinkGate = 'checking' | 'off' | 'disconnected' | 'unlinked' | 'linked'
+
+export function linkGate(p: PublikStatus | null): LinkGate {
+  if (!p) return 'checking'
+  if (!p.provisioned) return 'off'
+  if (p.status?.disconnected) return 'disconnected'
+  return claimState(p) === 'claimed' ? 'linked' : 'unlinked'
+}
+
+export const LINK_GATE_TITLE = 'Link your publik account to start'
+export const LINK_GATE_BODY =
+  'publikclip runs on a linked publik account. Linking gives $0.05 of free use, once.'
+export const LINK_STILL_REQUIRED = 'A linked publik account is still required.'
+
+/**
+ * The one card that stands in for the run control until the computer is
+ * linked: turn publik API on (or reconnect it), open the claim page in the
+ * browser, then "I've linked it" asks the server (GET /wallet) and re-renders.
+ */
+export function LinkGateCard({
+  publik,
+  checking = false,
+  inline = false,
+  onChange
+}: {
+  publik: PublikStatus | null
+  /** the server has not answered yet: say so instead of asking for a link */
+  checking?: boolean
+  /** inside another card (onboarding): no outer frame */
+  inline?: boolean
+  onChange: (p: PublikStatus) => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
+  const gate = checking ? 'checking' : linkGate(publik)
+  if (gate === 'linked') return null
+
+  async function turnOn() {
+    setBusy(true)
+    setNote(null)
+    try {
+      onChange(await api.publikProvision())
+    } catch (err) {
+      setNote(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function recheck() {
+    setBusy(true)
+    setNote(null)
+    try {
+      const p = await api.publikRefresh()
+      onChange(p)
+      if (linkGate(p) === 'unlinked') {
+        setNote(
+          p.refreshed
+            ? "publik doesn't show this computer as linked yet. Finish linking in your browser, then try again."
+            : "Couldn't reach publik API. Check your connection, then try again."
+        )
+      }
+    } catch (err) {
+      setNote(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const claim = gate === 'unlinked' ? accountLink(publik)?.url ?? null : null
+
+  return (
+    <section className={`publik-banner publik-gate ${inline ? 'publik-gate-inline' : ''}`}>
+      <span className="led led-half" />
+      <div>
+        <strong>{LINK_GATE_TITLE}</strong>
+        <p>{LINK_GATE_BODY}</p>
+        {gate === 'checking' && <p className="publik-fine mono">Checking this computer's publik account…</p>}
+        {gate === 'off' && <p className="publik-fine">{PUBLIK_DATA_PATH}</p>}
+        {gate === 'disconnected' && (
+          <p className="publik-fine">publik API is disconnected on this computer. Reconnect it first.</p>
+        )}
+        {gate !== 'checking' && (
+          <div className="publik-actions">
+            {gate === 'off' && (
+              <button className="btn-primary" onClick={turnOn} disabled={busy}>
+                {busy ? 'Setting up…' : 'Turn on publik API'}
+              </button>
+            )}
+            {gate === 'disconnected' && (
+              <button className="btn-primary" onClick={turnOn} disabled={busy}>
+                {busy ? 'Reconnecting…' : 'Reconnect publik API'}
+              </button>
+            )}
+            {gate === 'unlinked' && (
+              <>
+                <button className="btn-primary" onClick={() => claim && openUrl(claim)} disabled={!claim}>
+                  Link this computer
+                </button>
+                <button className="btn-secondary" onClick={recheck} disabled={busy}>
+                  {busy ? 'Checking…' : "I've linked it"}
+                </button>
+              </>
+            )}
+          </div>
+        )}
+        {note && <p className="ig-message mono">{note}</p>}
+      </div>
+    </section>
   )
 }
