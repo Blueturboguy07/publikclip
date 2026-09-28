@@ -118,6 +118,28 @@ def test_stage_error_marks_job_failed():
     assert "politely" in (fetched.error or "")
 
 
+class CrashingStage(queue.Stage):
+    """A dependency's own exception type, not StageError."""
+
+    name = "crashing"
+    schema_version = 1
+
+    def run(self, ctx):
+        raise FileNotFoundError(2, "No such file or directory", "ffmpeg")
+
+
+def test_unexpected_oserror_is_recorded_with_its_filename():
+    # repr(FileNotFoundError(2, ..., 'ffmpeg')) is "FileNotFoundError(2, 'No
+    # such file or directory')" — the packaged app showed exactly that and
+    # nobody could tell WHAT was missing.
+    job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
+    with pytest.raises(FileNotFoundError):
+        queue.run_stages(job, [CrashingStage()], _noop_progress)
+    fetched = queue.get_job(job.id)
+    assert fetched.status == "failed"
+    assert fetched.error == "crashing: FileNotFoundError: [Errno 2] No such file or directory: 'ffmpeg'"
+
+
 def test_failure_then_resume_skips_completed_stages():
     job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
     counting = CountingStage()

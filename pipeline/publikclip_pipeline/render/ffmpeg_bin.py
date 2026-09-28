@@ -76,8 +76,27 @@ def resolve() -> tuple[str, bool]:
             continue
         fallback = fallback or cand
         if _has_subtitles_filter(cand):
-            return cand, True
-    return (fallback or "ffmpeg"), False
+            return _export_to_path(cand), True
+    if fallback:
+        return _export_to_path(fallback), False
+    return "ffmpeg", False
+
+
+def _export_to_path(binary: str) -> str:
+    """Put the chosen binary's directory at the front of this process's PATH.
+
+    Third-party code that shells out to a bare ``ffmpeg``/``ffprobe``
+    (whisperx's audio loader, librosa's audioread fallback for mp3 imports,
+    …) then finds the same binary publikclip picked. Under the packaged
+    app's Finder PATH (/usr/bin:/bin:/usr/sbin:/sbin) it found nothing and
+    died with FileNotFoundError, even though ingest had just used a
+    perfectly good ffmpeg one resolver call earlier. Idempotent."""
+    directory = os.path.dirname(os.path.abspath(binary))
+    parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    if parts[:1] != [directory]:
+        rest = [p for p in parts if p != directory]
+        os.environ["PATH"] = os.pathsep.join([directory, *rest])
+    return binary
 
 
 def ffmpeg() -> str:

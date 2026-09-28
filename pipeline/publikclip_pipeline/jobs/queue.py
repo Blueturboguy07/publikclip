@@ -210,6 +210,15 @@ class StageError(Exception):
     """A stage failed in a way the user can act on. Message is user-facing."""
 
 
+def describe_error(err: BaseException) -> str:
+    """``Type: message`` for an unexpected crash. ``repr(err)`` drops the one
+    thing an OSError is about — its filename: the packaged app reported
+    ``FileNotFoundError(2, 'No such file or directory')`` and never said the
+    missing file was ``ffmpeg``. ``str(err)`` keeps it."""
+    text = str(err) or repr(err)
+    return f"{type(err).__name__}: {text}"
+
+
 ProgressFn = Callable[[str, float, str], None]  # (stage, fraction 0..1 or -1, message)
 
 
@@ -266,8 +275,8 @@ def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[
             set_job_status(job.id, "failed", f"{stage.name}: {err}")
             raise
         except Exception as err:  # noqa: BLE001 - record then re-raise
-            mark_stage(job.id, stage.name, "failed", stage.schema_version, repr(err))
-            set_job_status(job.id, "failed", f"{stage.name}: {err!r}")
+            mark_stage(job.id, stage.name, "failed", stage.schema_version, describe_error(err))
+            set_job_status(job.id, "failed", f"{stage.name}: {describe_error(err)}")
             raise
         write_checkpoint(job, stage.name, stage.schema_version, data)
         results[stage.name] = data
