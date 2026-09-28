@@ -89,6 +89,14 @@ export default function App() {
     }
   }, [refreshJobs])
 
+  // run_job/resume_job refuse to start on a computer that is not linked to
+  // a publik account (the Studio's link card normally stops it first): put
+  // the studio back to idle and show why.
+  const failStart = useCallback((err: unknown) => {
+    setRunning(false)
+    setRunError(String(err))
+  }, [])
+
   const startRun = useCallback(
     async (source: string, llm: string, captions: string) => {
       setRunning(true)
@@ -96,9 +104,9 @@ export default function App() {
       setStages({})
       setResults(null)
       setActiveJob(null)
-      await api.runJob(source, llm, captions)
+      await api.runJob(source, llm, captions).catch(failStart)
     },
-    []
+    [failStart]
   )
 
   const openJob = useCallback(async (jobId: string) => {
@@ -140,7 +148,7 @@ export default function App() {
           setStages({})
           setActiveJob(results.job_id)
           setView('studio')
-          api.resumeJob(results.job_id, undefined, captions, camera)
+          api.resumeJob(results.job_id, undefined, captions, camera).catch(failStart)
         }}
       />
     )
@@ -160,7 +168,7 @@ export default function App() {
         setRunError(null)
         setStages({})
         setActiveJob(id)
-        api.resumeJob(id, llm)
+        api.resumeJob(id, llm).catch(failStart)
       }}
     />
   )

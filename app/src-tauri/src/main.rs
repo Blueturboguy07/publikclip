@@ -137,6 +137,7 @@ fn pipeline_invocation() -> (String, Vec<String>) {
 
 #[tauri::command]
 fn run_job(app: AppHandle, source: String, llm: Option<String>, captions: Option<String>) -> Result<(), String> {
+    publik::require_linked()?;
     let (program, base_args) = pipeline_invocation();
     std::thread::spawn(move || {
         let mut args = base_args.clone();
@@ -164,6 +165,7 @@ fn resume_job(
     captions: Option<String>,
     camera: Option<String>,
 ) -> Result<(), String> {
+    publik::require_linked()?;
     let (program, base_args) = pipeline_invocation();
     std::thread::spawn(move || {
         let mut args = base_args.clone();
@@ -645,6 +647,7 @@ fn main() {
             export_clip,
             publik::publik_provision,
             publik::publik_status,
+            publik::publik_refresh,
             publik::publik_disconnect,
             save_freesound_key,
             save_jamendo_key,
