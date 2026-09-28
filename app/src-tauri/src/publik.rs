@@ -319,6 +319,8 @@ fn now_rfc3339() -> String {
 mod tests {
     use super::*;
 
+    // Under the 0059 policy an anonymous mint is $0.00 — the once-per-account
+    // $0.05 starter is granted when a computer links, not at mint time.
     fn mint_fixture(key: Value) -> Value {
         json!({
             "install_id": "0f8e2c1a-1111-4222-8333-444455556666",
@@ -328,10 +330,27 @@ mod tests {
             "claim_code": "HK7F-2QWD",
             "claim_url": "https://publikhq.com/claim/HK7F-2QWD",
             "claim_state": "anonymous",
-            "starter_micros": 250000,
-            "balance_micros": 250000,
-            "wallet": {"balance_micros": 250000, "add_credit_url": "https://publikhq.com/dashboard/api/add",
+            "starter_micros": 0,
+            "balance_micros": 0,
+            "wallet": {"balance_micros": 0, "add_credit_url": "https://publikhq.com/dashboard/api/add",
                        "top_up_url": "https://publikhq.com/claim/HK7F-2QWD"},
+            "disclosure": {"version": 1, "cost": "The cost sentence.", "data_path": "The data sentence."}
+        })
+    }
+
+    // An install minted while already bound to a signed-in account gets the
+    // lifetime $0.05 starter immediately, since there is no separate link step.
+    fn mint_fixture_claimed(key: Value) -> Value {
+        json!({
+            "install_id": "0f8e2c1a-1111-4222-8333-444455556666",
+            "key": key,
+            "key_id": "abc123def456",
+            "base_url": "https://publikhq.com/api/v1",
+            "claim_url": Value::Null,
+            "claim_state": "claimed",
+            "starter_micros": 50000,
+            "balance_micros": 50000,
+            "wallet": {"balance_micros": 50000, "add_credit_url": "https://publikhq.com/dashboard/api/add"},
             "disclosure": {"version": 1, "cost": "The cost sentence.", "data_path": "The data sentence."}
         })
     }
@@ -361,10 +380,18 @@ mod tests {
     }
 
     #[test]
-    fn status_seed_has_the_starter_balance() {
+    fn status_seed_is_zero_for_an_anonymous_mint() {
         let s = status_from_mint(&mint_fixture(json!("pk_live_x")));
-        assert_eq!(s["balance_micros"], 250000);
+        assert_eq!(s["balance_micros"], 0);
         assert_eq!(s["claim_state"], "anonymous");
+        assert_eq!(s["needs_credit"], false);
+    }
+
+    #[test]
+    fn status_seed_has_the_starter_balance_when_mint_is_account_bound() {
+        let s = status_from_mint(&mint_fixture_claimed(json!("pk_live_x")));
+        assert_eq!(s["balance_micros"], 50000);
+        assert_eq!(s["claim_state"], "claimed");
         assert_eq!(s["needs_credit"], false);
     }
 

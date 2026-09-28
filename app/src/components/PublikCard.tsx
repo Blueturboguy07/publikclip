@@ -9,9 +9,10 @@ import type { PublikStatus } from '../types'
  */
 
 export const PUBLIK_PRE_SETUP =
-  'Scoring runs on publik API: no account, no key to paste. It is paid per use, ' +
-  'in dollars, from a publik balance. Setting it up shows your starting balance ' +
-  'and exactly how the price works — nothing is spent until you run a video.'
+  'Scoring runs on publik API: no key to paste. It is paid per use, in dollars, ' +
+  'from a publik balance. Your balance starts at $0.00. Linking your publik ' +
+  'account gives $0.05 of free use, once; a plan, a pack, or your own key takes ' +
+  'it from there. Nothing is spent until you run a video.'
 
 export const PUBLIK_DATA_PATH =
   "Your transcript slices and a few low-res frames go through publik's servers " +
@@ -27,13 +28,17 @@ export function claimState(p: PublikStatus | null): 'anonymous' | 'claimed' {
   return p?.status?.claim_state ?? p?.claim_state ?? 'anonymous'
 }
 
-/** "publik API · $0.25 of free starter usage left" / "publik API · $3.12 left" */
+/** "publik API · $0.00" (nothing linked yet) / "publik API · $0.05 of free use left"
+ *  (only when the whole balance is the starter) / "publik API · $3.12 left".
+ *  balance_micros is plan + pack + starter, so a linked account with a plan and
+ *  an unspent starter must not have its whole balance called free. */
 export function balanceLine(p: PublikStatus | null): string {
   const b = currentBalance(p)
   if (b == null) return 'publik API ready'
+  if (b === 0) return `publik API · ${dollars(b)}`
   const starter = p?.status?.starter_remaining_micros
-  if (claimState(p) === 'anonymous' && (starter == null || starter > 0)) {
-    return `publik API · ${dollars(b)} of free starter usage left`
+  if (starter != null && starter > 0 && starter >= b) {
+    return `publik API · ${dollars(b)} of free use left`
   }
   return `publik API · ${dollars(b)} left`
 }
