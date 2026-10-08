@@ -24,7 +24,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -34,6 +34,23 @@ from .. import config
 # keys while still advertising them in ListModels (learned live — 404 "no
 # longer available to new users" on gemini-2.5-flash with a fresh key).
 GEMINI_MODEL = "gemini-flash-latest"
+# Tried in order when Google keeps answering the model above with a 5xx
+# ("the model is overloaded"), a 404 (retired for this key) or a quota 429.
+# Free-tier keys are shed from the flagship flash alias first, and a
+# brand-new key stayed shed for three days straight (Windows report, Oct 7
+# 2026: "Gemini call failed after retries: Server error '503'") while the
+# lite aliases answered the same key in about a second. Each alias has its
+# own quota, so a lite model is a different queue, not the same one again.
+GEMINI_FALLBACK_MODELS = (
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
+)
+# Seconds to wait before the 2nd and 3rd try on the same model. The old loop
+# retried instantly, so an overloaded model took three hits inside a second
+# and the job failed before Google could have let the next request through.
+GEMINI_RETRY_WAITS = (3.0, 8.0)
 GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com"
 # publik API: alias names only — the gateway owns which model sits behind
@@ -201,11 +218,18 @@ def _record_publik_status(res: httpx.Response, extra: dict | None = None) -> Non
         pass
 
 
-def _error_message(res: httpx.Response) -> str:
+def _error_message(res: httpx.Response, default: str = "request failed") -> str:
     try:
         return str(res.json()["error"]["message"])
     except Exception:  # noqa: BLE001
-        return "request failed"
+        return default
+
+
+def _parse_answer(res: httpx.Response) -> dict:
+    """The JSON object the model wrote, out of a generateContent answer."""
+    payload = res.json()
+    text = payload["candidates"][0]["content"]["parts"][0]["text"]
+    return json.loads(_strip_fences(text))
 
 
 def _publik_error(res: httpx.Response) -> PublikStopError:
@@ -284,20 +308,24 @@ class GeminiClient:
 
     backend = "gemini"
 
-    def __init__(self, endpoint: Endpoint | None = None):
+    def __init__(self, endpoint: Endpoint | None = None, notify: Callable[[str], None] | None = None):
         self.endpoint = endpoint or resolve_endpoint("gemini")
+        # The model calls go to right now. Own-key mode moves it down
+        # GEMINI_FALLBACK_MODELS when Google keeps refusing, and it stays
+        # moved for the rest of the run so moment 2 of 35 doesn't pay the
+        # same three-strikes wait moment 1 did.
         self.model = self.endpoint.model
         self.provider = self.endpoint.provider
+        # One line per model switch, for the progress panel; None = silent.
+        self.notify = notify
+        self._models_left: list[str] = (
+            [] if self.provider == "publik" else [m for m in GEMINI_FALLBACK_MODELS if m != self.model]
+        )
 
     def generate_json(
         self, prompt: str, schema: dict, images: list[bytes] | None = None
     ) -> dict:
         images = images or []
-        key = _cache_key(self.backend, self.model, prompt, schema, images)
-        cache_file = _cache_dir() / f"{key}.json"
-        if cache_file.exists():
-            return json.loads(cache_file.read_text())
-
         parts: list[dict[str, Any]] = [{"text": prompt}]
         for img in images:
             import base64
@@ -316,58 +344,112 @@ class GeminiClient:
         # Header transport, never ?key= — a key in the URL leaks through
         # logs and URL scans (Google's own guidance).
         headers = {"x-goog-api-key": self.endpoint.key}
-        publik = self.provider == "publik"
-        if publik:
-            # A repeated call is the same call: the gateway can dedupe on it.
-            headers["x-publik-idempotency-key"] = key
+        if self.provider == "publik":
+            return self._publik_call(body, headers, prompt, schema, images)
+        return self._gemini_call(body, headers, prompt, schema, images)
+
+    def _publik_call(
+        self, body: dict, headers: dict, prompt: str, schema: dict, images: list[bytes]
+    ) -> dict:
+        key = _cache_key(self.backend, self.model, prompt, schema, images)
+        cache_file = _cache_dir() / f"{key}.json"
+        if cache_file.exists():
+            return json.loads(cache_file.read_text())
+        # A repeated call is the same call: the gateway can dedupe on it.
+        headers = {**headers, "x-publik-idempotency-key": key}
         # publik API settles real usage even after a client gives up, so a
-        # timed-out publik call is final — retrying could pay for it twice.
-        attempts = 1 if publik else 3
-        who = "publik API" if publik else "Gemini"
+        # timed-out publik call is final — one try, never a retry, and never
+        # another model: the gateway owns which model sits behind the alias.
+        try:
+            res = httpx.post(self.endpoint.url(), headers=headers, json=body, timeout=LLM_TIMEOUT)
+            if res.status_code in (401, 402, 403):
+                raise _publik_error(res)
+            _record_publik_status(res)
+            if res.status_code == 429:
+                # The gateway's own words: a quota backoff and a "credits
+                # depleted" billing stop look identical as bare 429s but
+                # need opposite user actions.
+                raise LlmError(f"publik API 429: {_error_message(res, 'rate limited')}")
+            if res.status_code >= 400:
+                raise LlmError(f"publik API {res.status_code}: {_error_message(res)}")
+            data = _parse_answer(res)
+        except LlmError:
+            raise
+        except (httpx.HTTPError, KeyError, json.JSONDecodeError, IndexError) as err:
+            raise LlmError(f"publik API call failed: {err}") from err
+        cache_file.write_text(json.dumps(data))
+        return data
+
+    def _gemini_call(
+        self, body: dict, headers: dict, prompt: str, schema: dict, images: list[bytes]
+    ) -> dict:
+        """Own-key mode: the current model first, then each fallback, each
+        with up to three tries. A model is given up on only for what that
+        model did (5xx, quota 429, 404); a dead network fails here, since
+        the next model would time out just the same."""
+        models = [self.model, *self._models_left]
+        failures: list[str] = []
+        for idx, model in enumerate(models):
+            key = _cache_key(self.backend, model, prompt, schema, images)
+            cache_file = _cache_dir() / f"{key}.json"
+            if cache_file.exists():
+                return json.loads(cache_file.read_text())
+            verdict, payload = self._try_model(model, body, headers)
+            if verdict == "ok":
+                cache_file.write_text(json.dumps(payload))
+                self.model = model
+                self._models_left = models[idx + 1 :]
+                return payload
+            failures.append(f"{model}: {payload}")
+            if idx + 1 < len(models) and self.notify:
+                self.notify(f"Gemini {model} answered {payload}; trying {models[idx + 1]}")
+        raise LlmError(
+            "Gemini could not answer on any model (" + "; ".join(failures) + "). "
+            "Google turns free keys away first when its servers are busy. Wait a few "
+            "minutes and run again, or switch the brain to publik API in Settings."
+        )
+
+    def _try_model(self, model: str, body: dict, headers: dict) -> tuple[str, Any]:
+        """Up to three tries on one model. ("ok", data) on success; ("next",
+        reason) when this model is the problem and the next one should be
+        tried; raises LlmError when trying another model cannot help."""
+        url = self.endpoint.url(model)
         last_err: Exception | None = None
-        for attempt in range(attempts):
+        for attempt in range(3):
+            if attempt:
+                time.sleep(GEMINI_RETRY_WAITS[attempt - 1])
             try:
-                res = httpx.post(
-                    self.endpoint.url(),
-                    headers=headers,
-                    json=body,
-                    timeout=LLM_TIMEOUT,
-                )
-                if publik:
-                    if res.status_code in (401, 402, 403):
-                        raise _publik_error(res)
-                    _record_publik_status(res)
-                elif res.status_code in (401, 403):
-                    raise LlmError("Gemini rejected the API key. Check it in Settings.")
-                if res.status_code == 429:
-                    # Surface the API's own words — a quota backoff and a
-                    # "credits depleted" billing stop look identical as bare
-                    # 429s but need opposite user actions. publik's error
-                    # envelope carries error.message too.
-                    try:
-                        detail = res.json()["error"]["message"]
-                    except Exception:  # noqa: BLE001
-                        detail = "rate limited"
-                    last_err = LlmError(f"{who} 429: {detail}")
-                    if publik or "credit" in detail.lower() or "billing" in detail.lower():
-                        raise last_err
-                    time.sleep(4 * (attempt + 1))
-                    continue
-                if publik and res.status_code >= 400:
-                    raise LlmError(f"publik API {res.status_code}: {_error_message(res)}")
+                res = httpx.post(url, headers=headers, json=body, timeout=LLM_TIMEOUT)
+            except httpx.HTTPError as err:
+                last_err = err  # the network, not the model
+                continue
+            status = res.status_code
+            if status in (401, 403):
+                raise LlmError("Gemini rejected the API key. Check it in Settings.")
+            if status == 404:
+                # Retired for this key ("no longer available to new users");
+                # it will say so again, so straight to the next model.
+                return "next", f"404 {_error_message(res, 'model not found')}"
+            if status == 429:
+                detail = _error_message(res, "rate limited")
+                if "credit" in detail.lower() or "billing" in detail.lower():
+                    raise LlmError(f"Gemini 429: {detail}")
+                last_err = LlmError(f"429 {detail}")
+                continue
+            if status >= 500:
+                last_err = LlmError(f"{status} {_error_message(res, 'server error')}")
+                continue
+            try:
                 res.raise_for_status()
-                payload = res.json()
-                text = payload["candidates"][0]["content"]["parts"][0]["text"]
-                data = json.loads(_strip_fences(text))
-                cache_file.write_text(json.dumps(data))
-                return data
-            except LlmError:
-                raise
+                data = _parse_answer(res)
             except (httpx.HTTPError, KeyError, json.JSONDecodeError, IndexError) as err:
                 last_err = err
-        if attempts == 1:
-            raise LlmError(f"{who} call failed: {last_err}")
-        raise LlmError(f"{who} call failed after retries: {last_err}")
+                continue
+            return "ok", data
+        if isinstance(last_err, LlmError):
+            # three 5xx or quota answers in a row: this model's problem
+            return "next", str(last_err)
+        raise LlmError(f"Gemini call failed after retries: {last_err}")
 
 
 class OllamaClient:
@@ -432,7 +514,7 @@ def _pick_ollama_model(models: list[str]) -> str:
     return models[0]
 
 
-def make_client(llm_mode: str):
+def make_client(llm_mode: str, notify: Callable[[str], None] | None = None):
     if llm_mode == "ollama":
         return OllamaClient()
-    return GeminiClient(resolve_endpoint(llm_mode))
+    return GeminiClient(resolve_endpoint(llm_mode), notify=notify)

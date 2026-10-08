@@ -415,3 +415,115 @@ def test_copy_rule():
                 if banned.search(line):
                     hits.append(f"{f}:{n}: {line.strip()}")
     assert hits == []
+
+
+# --- own-key fallback across Gemini models ---------------------------------------
+#
+# Oct 7 2026, Windows: a brand-new free key got "503 Service Unavailable" on
+# gemini-flash-latest on every run for three days, and the job died at JUDGE
+# moment 1/35 after three instant retries. The lite aliases answered the same
+# key in a second.
+
+
+def _overloaded():
+    return _Res(503, {"error": {"message": "The model is overloaded. Please try again later."}})
+
+
+def _retired():
+    return _Res(404, {"error": {"message": "This model is no longer available to new users."}})
+
+
+def _model_of(call):
+    return re.search(r"/models/([^:]+):generateContent", call["url"]).group(1)
+
+
+def test_gemini_503_three_times_moves_to_the_lite_model(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    calls = _capture(monkeypatch, [_overloaded(), _overloaded(), _overloaded(), _ok_text()])
+    client = llm_mod.make_client("gemini")
+    assert client.generate_json("p", SCHEMA) == {"ok": True}
+    assert [_model_of(c) for c in calls] == [
+        "gemini-flash-latest",
+        "gemini-flash-latest",
+        "gemini-flash-latest",
+        "gemini-flash-lite-latest",
+    ]
+    assert client.model == "gemini-flash-lite-latest"
+
+
+def test_gemini_404_skips_the_model_without_retrying(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    calls = _capture(monkeypatch, [_retired(), _ok_text()])
+    assert llm_mod.make_client("gemini").generate_json("p", SCHEMA) == {"ok": True}
+    assert [_model_of(c) for c in calls] == ["gemini-flash-latest", "gemini-flash-lite-latest"]
+
+
+def test_gemini_switched_model_sticks_for_the_rest_of_the_run(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    _capture(monkeypatch, [_overloaded(), _overloaded(), _overloaded(), _ok_text()])
+    client = llm_mod.make_client("gemini")
+    client.generate_json("moment 1", SCHEMA)
+    calls = _capture(monkeypatch, [_ok_text()])
+    client.generate_json("moment 2", SCHEMA)
+    assert [_model_of(c) for c in calls] == ["gemini-flash-lite-latest"]
+
+
+def test_gemini_switch_is_reported_to_the_progress_panel(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    _capture(monkeypatch, [_overloaded(), _overloaded(), _overloaded(), _ok_text()])
+    notes = []
+    llm_mod.make_client("gemini", notify=notes.append).generate_json("p", SCHEMA)
+    assert len(notes) == 1
+    assert "gemini-flash-latest" in notes[0] and "503" in notes[0]
+    assert "trying gemini-flash-lite-latest" in notes[0]
+
+
+def test_gemini_every_model_overloaded_is_one_human_line(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    calls = _capture(monkeypatch, [_overloaded()])
+    with pytest.raises(llm_mod.LlmError) as exc:
+        llm_mod.make_client("gemini").generate_json("p", SCHEMA)
+    text = str(exc.value)
+    assert len(calls) == 3 * (1 + len(llm_mod.GEMINI_FALLBACK_MODELS))
+    assert "gemini-flash-latest: 503 The model is overloaded" in text
+    assert "publik API" in text  # the way out is named
+    assert "Server error" not in text  # not httpx's wording
+
+
+def test_gemini_quota_429_moves_on_but_billing_429_stops(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    quota = _Res(429, {"error": {"message": "Resource has been exhausted (e.g. check quota)."}})
+    calls = _capture(monkeypatch, [quota, quota, quota, _ok_text()])
+    assert llm_mod.make_client("gemini").generate_json("p", SCHEMA) == {"ok": True}
+    assert _model_of(calls[-1]) == "gemini-flash-lite-latest"
+    billing = _Res(429, {"error": {"message": "Your billing account has no credits."}})
+    calls = _capture(monkeypatch, [billing])
+    with pytest.raises(llm_mod.LlmError) as exc:
+        llm_mod.make_client("gemini").generate_json("q", SCHEMA)
+    assert len(calls) == 1 and "credits" in str(exc.value)
+
+
+def test_gemini_network_timeout_does_not_cascade_through_models(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    calls = _capture(monkeypatch, [httpx.ReadTimeout("slow")])
+    with pytest.raises(llm_mod.LlmError):
+        llm_mod.make_client("gemini").generate_json("p", SCHEMA)
+    assert {_model_of(c) for c in calls} == {"gemini-flash-latest"}
+
+
+def test_gemini_bad_key_never_tries_another_model(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    calls = _capture(monkeypatch, [_Res(403, {"error": {"message": "nope"}})])
+    with pytest.raises(llm_mod.LlmError) as exc:
+        llm_mod.make_client("gemini").generate_json("p", SCHEMA)
+    assert len(calls) == 1 and "rejected the API key" in str(exc.value)
+
+
+def test_publik_5xx_never_falls_back_to_a_gemini_slug(monkeypatch):
+    _write_secrets({"publik": {"key": "pk_live_a"}})
+    calls = _capture(monkeypatch, [_overloaded()])
+    with pytest.raises(llm_mod.LlmError) as exc:
+        llm_mod.make_client("publik").generate_json("p", SCHEMA)
+    assert len(calls) == 1
+    assert "publik API 503" in str(exc.value)
+    assert "gemini" not in calls[0]["url"].split("/models/")[1]
