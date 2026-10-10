@@ -6,8 +6,11 @@ and sentence-snapped candidate boundaries.
 
 Model choice: large-v3-turbo int8 by default — near-parity accuracy with
 large-v3 at a fraction of the compute, which is what makes local-first
-viable on Apple Silicon. Silero VAD (MIT) instead of whisperX's bundled
-pyannote VAD checkpoint, whose license the research flagged as unresolved.
+viable on Apple Silicon. Hosts without the memory for it step down the
+SPEECH_MODELS ladder (small, then base), chosen up front from free memory
+and again on a failed allocation. Silero VAD (MIT) instead of whisperX's
+bundled pyannote VAD checkpoint, whose license the research flagged as
+unresolved.
 
 The stage records wall-clock + realtime factor into its checkpoint — the M1
 gate's Apple Silicon benchmark comes from real runs, not synthetic tests.
@@ -20,15 +23,89 @@ import os
 import subprocess
 import time
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 
-from .. import config
+from .. import config, sysinfo
 from ..jobs.queue import Stage, StageContext, StageError
 
 ASR_MODEL = "large-v3-turbo"
 COMPUTE_TYPE = "int8"
 BATCH_SIZE = 8
 SAMPLE_RATE = 16000  # whisperx.audio.SAMPLE_RATE
+
+
+@dataclass(frozen=True)
+class SpeechModel:
+    name: str          # faster-whisper size name
+    download_mb: int   # what the first run fetches
+    needs_gib: float   # free memory to load the fp16 file, quantize to int8, transcribe
+    batch_size: int
+
+
+# Most accurate first. ctranslate2 reads the fp16 weights file and quantizes
+# to int8 in memory, so loading large-v3-turbo peaks well above its 1.6 GB
+# file. On an 8 GB Windows laptop with a browser open that allocation fails
+# inside ctranslate2's allocator ("mkl_malloc: failed to allocate memory",
+# Oct 10 2026, Ayaan). `small` keeps word timestamps and English accuracy
+# good enough for clip picking at a fifth of the memory; `base` is the floor.
+SPEECH_MODELS = (
+    SpeechModel("large-v3-turbo", download_mb=1600, needs_gib=3.5, batch_size=BATCH_SIZE),
+    SpeechModel("small", download_mb=480, needs_gib=1.8, batch_size=4),
+    SpeechModel("base", download_mb=150, needs_gib=1.0, batch_size=4),
+)
+
+_MEMORY_ERROR_MARKS = (
+    "failed to allocate memory",   # ctranslate2: mkl_malloc / aligned_alloc
+    "not enough memory",           # torch DefaultCPUAllocator
+    "out of memory",
+    "cannot allocate memory",      # errno ENOMEM
+    "unable to allocate",          # numpy
+    "bad_alloc",                   # std::bad_alloc
+)
+
+
+def is_memory_error(err: BaseException) -> bool:
+    if isinstance(err, MemoryError):
+        return True
+    text = str(err).lower()
+    return any(mark in text for mark in _MEMORY_ERROR_MARKS)
+
+
+def _gb(n_bytes: int) -> str:
+    return f"{n_bytes / sysinfo.GIB:.1f} GB"
+
+
+def plan_models(available: int | None, forced: str | None = None) -> tuple[list[SpeechModel], str | None]:
+    """Which speech models to try, in order, and a one-line reason when the
+    plan does not start at the most accurate one.
+
+    `forced` (PUBLIKCLIP_ASR_MODEL) pins one model for support cases. With
+    no memory reading the whole ladder is tried and a failed allocation
+    moves down a step; with one, models that cannot fit are skipped up
+    front so the user is not made to wait for a 1.6 GB download that would
+    only fail to load."""
+    if forced:
+        for spec in SPEECH_MODELS:
+            if spec.name == forced:
+                return [spec], f"PUBLIKCLIP_ASR_MODEL={forced}"
+        return [SpeechModel(forced, download_mb=0, needs_gib=0.0, batch_size=4)], f"PUBLIKCLIP_ASR_MODEL={forced}"
+    ladder = list(SPEECH_MODELS)
+    if available is None:
+        return ladder, None
+    for idx, spec in enumerate(ladder):
+        if available >= spec.needs_gib * sysinfo.GIB:
+            if idx == 0:
+                return ladder, None
+            return ladder[idx:], (
+                f"{_gb(available)} free: using the {spec.name} speech model, "
+                f"not {ladder[0].name} (needs about {ladder[0].needs_gib:g} GB, less accurate)"
+            )
+    last = ladder[-1]
+    return [last], (
+        f"Only {_gb(available)} free: trying the {last.name} speech model "
+        f"(needs about {last.needs_gib:g} GB)"
+    )
 
 
 def load_audio(path: Path):
@@ -102,20 +179,57 @@ class AsrStage(Stage):
             raise StageError("Analysis audio missing — re-run ingest.")
 
         _point_caches_at_home()
-        ctx.emit(-1, "Loading speech model (downloads ~1.6 GB on first run)…")
         import torch  # deferred: heavy import
         import whisperx
 
         device = "cpu"  # ctranslate2 has no MPS backend; int8 CPU is the local path
-        t0 = time.monotonic()
-        model = whisperx.load_model(
-            ASR_MODEL, device, compute_type=COMPUTE_TYPE, vad_method="silero"
-        )
         audio = load_audio(audio_path)
         duration = float(len(audio)) / SAMPLE_RATE
 
-        ctx.emit(-1, "Transcribing…")
-        result = model.transcribe(audio, batch_size=BATCH_SIZE)
+        available = sysinfo.available_memory_bytes()
+        plan, reason = plan_models(available, os.environ.get("PUBLIKCLIP_ASR_MODEL"))
+        if reason:
+            ctx.emit(-1, reason)
+
+        t0 = time.monotonic()
+        failures: list[str] = []
+        result = None
+        used: SpeechModel | None = None
+        for idx, spec in enumerate(plan):
+            ctx.emit(
+                -1,
+                f"Loading the {spec.name} speech model"
+                + (f" (downloads ~{spec.download_mb} MB on first run)…" if spec.download_mb else "…"),
+            )
+            model = None
+            try:
+                model = whisperx.load_model(
+                    spec.name, device, compute_type=COMPUTE_TYPE, vad_method="silero"
+                )
+                ctx.emit(-1, "Transcribing…")
+                result = model.transcribe(audio, batch_size=spec.batch_size)
+                used = spec
+                break
+            except Exception as err:  # noqa: BLE001 — sort memory from everything else
+                del model
+                gc.collect()
+                if not is_memory_error(err):
+                    # Download failures, a corrupt cache, a missing DLL: none
+                    # of these get better with a smaller model.
+                    raise StageError(f"Could not load the {spec.name} speech model: {err}") from err
+                failures.append(f"{spec.name}: {err}")
+                if idx + 1 < len(plan):
+                    ctx.emit(
+                        -1,
+                        f"Not enough free memory for the {spec.name} speech model; "
+                        f"trying {plan[idx + 1].name} (less accurate)…",
+                    )
+        if result is None or used is None:
+            raise StageError(
+                "Not enough free memory to run a speech model ("
+                + "; ".join(failures)
+                + "). Close other apps and browser tabs, then resume the job."
+            )
         language = result.get("language", "en")
         transcribe_secs = time.monotonic() - t0
 
@@ -126,11 +240,19 @@ class AsrStage(Stage):
 
         ctx.emit(-1, "Aligning words…")
         t1 = time.monotonic()
-        align_model, align_meta = whisperx.load_align_model(language_code=language, device=device)
-        aligned = whisperx.align(
-            result["segments"], align_model, align_meta, audio, device,
-            return_char_alignments=False,
-        )
+        try:
+            align_model, align_meta = whisperx.load_align_model(language_code=language, device=device)
+            aligned = whisperx.align(
+                result["segments"], align_model, align_meta, audio, device,
+                return_char_alignments=False,
+            )
+        except Exception as err:  # noqa: BLE001
+            if is_memory_error(err):
+                raise StageError(
+                    "Not enough free memory to align the words. "
+                    "Close other apps and browser tabs, then resume the job."
+                ) from err
+            raise
         align_secs = time.monotonic() - t1
         del align_model
         gc.collect()
@@ -167,7 +289,11 @@ class AsrStage(Stage):
         total = transcribe_secs + align_secs
         return {
             "language": language,
-            "model": ASR_MODEL,
+            "model": used.name,
+            "model_fallback": used.name != SPEECH_MODELS[0].name,
+            "model_reason": reason,
+            "memory_available_gb": round(available / sysinfo.GIB, 2) if available else None,
+            "memory_failures": failures,
             "compute_type": COMPUTE_TYPE,
             "segments": segments,
             "word_count": word_count,
