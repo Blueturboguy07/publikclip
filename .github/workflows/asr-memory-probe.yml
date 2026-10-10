@@ -1,0 +1,22 @@
+name: asr-memory-probe
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: pipeline/uv.lock
+      - name: Sync pipeline deps
+        working-directory: pipeline
+        run: uv sync --group pipeline
+      - name: Probe speech-model memory under commit caps
+        working-directory: pipeline
+        env:
+          HF_HOME: ${{ runner.temp }}\hf
+          TORCH_HOME: ${{ runner.temp }}\torch
+        run: uv run python tools/asr_memory_probe.py
