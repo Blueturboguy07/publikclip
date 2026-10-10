@@ -1,5 +1,7 @@
 name: asr-memory-probe
 on:
+  push:
+    branches: [probe/asr-memory]
   workflow_dispatch:
 jobs:
   probe:
