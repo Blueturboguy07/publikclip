@@ -78,7 +78,9 @@ class ScoreStage(Stage):
 
         llm_mode = ctx.settings.llm_mode
         try:
-            client = llm_mod.make_client(llm_mode)
+            # notify: a model switch shows up under JUDGE instead of the
+            # moment counter silently taking longer.
+            client = llm_mod.make_client(llm_mode, notify=lambda msg: ctx.emit(-1, msg))
         except llm_mod.LlmError as err:
             raise StageError(str(err)) from err
 
