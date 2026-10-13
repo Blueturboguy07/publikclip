@@ -31,6 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .. import config
+from ..jobs import queue
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS published_clips (
@@ -155,8 +156,8 @@ def rendered_clips() -> list[dict]:
         if not render_path.exists() or not score_path.exists():
             continue
         try:
-            render = json.loads(render_path.read_text())["data"]
-            score = json.loads(score_path.read_text())["data"]
+            render = queue.read_json_compat(render_path)["data"]
+            score = queue.read_json_compat(score_path)["data"]
         except (json.JSONDecodeError, KeyError, OSError):
             continue
         clips = score.get("clips", [])

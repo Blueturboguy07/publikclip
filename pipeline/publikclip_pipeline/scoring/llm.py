@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +52,21 @@ GEMINI_FALLBACK_MODELS = (
 # retried instantly, so an overloaded model took three hits inside a second
 # and the job failed before Google could have let the next request through.
 GEMINI_RETRY_WAITS = (3.0, 8.0)
+# Free-tier quotas (AI Studio, Oct 13 2026): the flash alias allows 5 requests
+# a minute and 20 a day, the lite models 10 a minute and 500 a day. Quotas are
+# per Google project; the daily ones reset at midnight Pacific. A 429 says
+# which quota it hit (QuotaFailure.violations[].quotaId ends in ...PerMinute...
+# or ...PerDay...) and how long to wait (RetryInfo.retryDelay, "15s"). Oct 11
+# 2026, Windows report with a free key: Google's standard quota text says
+# "check your plan and billing details", the old code read "billing" as a
+# billing stop, so JUDGE died on the first per-minute hit; each restart spent
+# more of the flash alias's 20 a day until it answered "retry in 11 hours",
+# while the lite models sat unused with 500 a day each.
+QUOTA_WAIT_CAP = 90.0        # longest single wait for a per-minute quota
+QUOTA_WAITS_PER_CALL = 4     # per-minute waits on one model before trying the next
+QUOTA_DEFAULT_WAIT = 15.0    # when the 429 does not say how long
+QUOTA_DEFAULT_RPM = 5        # free-tier flash, when the 429 does not name the limit
+QUOTA_DAY_THRESHOLD = 600.0  # an unlabeled 429 asking for a longer wait is a daily quota
 GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com"
 # publik API: alias names only — the gateway owns which model sits behind
@@ -87,6 +103,12 @@ class PublikStopError(LlmError):
     """publik API said stop: out of balance (402) or this computer's key no
     longer works (401/403). Every further call would fail the same way, so
     callers that normally swallow optional-evidence failures re-raise it."""
+
+
+class QuotaExhaustedError(LlmError):
+    """Own-key Gemini: today's free requests are used up on every model the
+    ladder has. Nothing answers until Google's daily reset; the job resumes
+    from its cache then."""
 
 
 @dataclass(frozen=True)
@@ -300,6 +322,111 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+@dataclass(frozen=True)
+class QuotaHit:
+    """What a Gemini 429 said: which quota (per minute, per day, or unknown),
+    how long Google asked us to wait, and the limit it named."""
+
+    scope: str  # "minute" | "day" | "unknown"
+    retry_after: float | None
+    limit: int | None
+    message: str
+
+    def describe(self) -> str:
+        if self.scope == "day":
+            limit = f" ({self.limit} a day)" if self.limit else ""
+            when = _in_about(self.retry_after) if self.retry_after else "at midnight Pacific time"
+            return f"today's free requests used{limit}; resets {when}"
+        if self.scope == "minute":
+            limit = f" ({self.limit} a minute)" if self.limit else ""
+            return f"rate limited{limit}"
+        return f"429 {self.message}"
+
+
+_DURATION = re.compile(
+    r"^\s*(?:(\d+(?:\.\d+)?)h)?\s*(?:(\d+(?:\.\d+)?)m)?\s*(?:(\d+(?:\.\d+)?)s?)?\s*$"
+)
+
+
+def _seconds(value: Any) -> float | None:
+    """Google's two spellings of a wait: the structured retryDelay ('15s',
+    '39599.4s') and the message's own ('20h20m4.321946213s', seen in an
+    Oct 11 2026 screenshot). A bare number is seconds."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    m = _DURATION.match(text)
+    if not m or not any(m.groups()):
+        return None
+    hours, minutes, seconds = (float(g) if g else 0.0 for g in m.groups())
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _in_about(seconds: float) -> str:
+    if seconds >= 5400:
+        return f"in about {round(seconds / 3600)} h"
+    if seconds >= 90:
+        return f"in about {round(seconds / 60)} min"
+    return f"in about {round(seconds)} s"
+
+
+def _quota_hit(res: httpx.Response) -> QuotaHit:
+    """Read a 429 the way Google writes it: the structured details first
+    (quotaId, quotaValue, retryDelay), the message's own words as the
+    fallback. Never trusts the word "billing": the standard quota text
+    contains it."""
+    try:
+        err = res.json().get("error") or {}
+        if not isinstance(err, dict):
+            err = {}
+    except Exception:  # noqa: BLE001
+        err = {}
+    message = str(err.get("message") or "rate limited").strip()
+    scope, retry_after = "unknown", None
+    day_limit = minute_limit = None
+    details = err.get("details") if isinstance(err.get("details"), list) else []
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        kind = str(detail.get("@type", ""))
+        if kind.endswith("RetryInfo"):
+            retry_after = _seconds(detail.get("retryDelay"))
+        elif kind.endswith("QuotaFailure"):
+            for violation in detail.get("violations") or []:
+                if not isinstance(violation, dict):
+                    continue
+                quota_id = str(violation.get("quotaId", "")).lower()
+                value = str(violation.get("quotaValue", ""))
+                number = int(value) if value.isdigit() else None
+                if "perday" in quota_id:
+                    scope = "day"
+                    day_limit = number if number is not None else day_limit
+                elif "perminute" in quota_id:
+                    if scope != "day":
+                        scope = "minute"
+                    minute_limit = number if number is not None else minute_limit
+    low = message.lower()
+    if retry_after is None:
+        m = re.search(r"retry in ([\dhms.\s]+?)[.\s]*(?:$|\n)", low)
+        if m:
+            retry_after = _seconds(m.group(1).strip().rstrip("."))
+    if scope == "unknown":
+        if "per day" in low or "perday" in low or "daily" in low:
+            scope = "day"
+        elif "per minute" in low or "perminute" in low:
+            scope = "minute"
+        elif retry_after is not None:
+            scope = "day" if retry_after > QUOTA_DAY_THRESHOLD else "minute"
+    limit = day_limit if scope == "day" else minute_limit
+    if limit is None:
+        m = re.search(r"limit:\s*(\d+)", low)
+        if m:
+            limit = int(m.group(1))
+    return QuotaHit(scope, retry_after, limit, message)
+
+
 class GeminiClient:
     """Gemini's generateContent wire format, against either publik API or
     Google with the user's own key. `backend` stays "gemini" for both: the
@@ -321,6 +448,13 @@ class GeminiClient:
         self._models_left: list[str] = (
             [] if self.provider == "publik" else [m for m in GEMINI_FALLBACK_MODELS if m != self.model]
         )
+        # Own-key pacing: once Google names a model's per-minute limit, calls
+        # to that model are spaced to it for the rest of the run instead of
+        # tripping the limit every few calls.
+        self._interval: dict[str, float] = {}
+        self._last_call_at = 0.0
+        # Models whose daily quota this run used up: skipped without a call.
+        self._day_out: dict[str, QuotaHit] = {}
 
     def generate_json(
         self, prompt: str, schema: dict, images: list[bytes] | None = None
@@ -385,43 +519,90 @@ class GeminiClient:
     ) -> dict:
         """Own-key mode: the current model first, then each fallback, each
         with up to three tries. A model is given up on only for what that
-        model did (5xx, quota 429, 404); a dead network fails here, since
+        model did (5xx, daily quota, 404); a dead network fails here, since
         the next model would time out just the same."""
-        models = [self.model, *self._models_left]
+        ladder = [self.model, *self._models_left]
+        # Any model's cached answer is the answer: a resumed job that moved
+        # down the ladder yesterday must not spend today's quota re-asking.
+        for model in dict.fromkeys([*ladder, GEMINI_MODEL, *GEMINI_FALLBACK_MODELS]):
+            cached = _cache_dir() / f"{_cache_key(self.backend, model, prompt, schema, images)}.json"
+            if cached.exists():
+                return json.loads(cached.read_text())
+        models = [m for m in ladder if m not in self._day_out]
         failures: list[str] = []
         for idx, model in enumerate(models):
-            key = _cache_key(self.backend, model, prompt, schema, images)
-            cache_file = _cache_dir() / f"{key}.json"
-            if cache_file.exists():
-                return json.loads(cache_file.read_text())
             verdict, payload = self._try_model(model, body, headers)
             if verdict == "ok":
-                cache_file.write_text(json.dumps(payload))
+                key = _cache_key(self.backend, model, prompt, schema, images)
+                (_cache_dir() / f"{key}.json").write_text(json.dumps(payload))
                 self.model = model
                 self._models_left = models[idx + 1 :]
                 return payload
             failures.append(f"{model}: {payload}")
             if idx + 1 < len(models) and self.notify:
                 self.notify(f"Gemini {model} answered {payload}; trying {models[idx + 1]}")
+        if not models or all(m in self._day_out for m in models):
+            used = "; ".join(
+                f"{m}: {hit.limit} a day" if hit.limit else m for m, hit in self._day_out.items()
+            )
+            soonest = min((h.retry_after for h in self._day_out.values() if h.retry_after), default=None)
+            when = f", {_in_about(soonest)}" if soonest else ""
+            raise QuotaExhaustedError(
+                "Your Gemini key has used today's free requests on every model publikclip "
+                f"can use ({used}). Google resets daily quotas at midnight Pacific time{when}. "
+                "Resume the job then: the moments already scored are saved and are not sent "
+                "again. Or switch the brain to publik API in Settings."
+            )
         raise LlmError(
             "Gemini could not answer on any model (" + "; ".join(failures) + "). "
             "Google turns free keys away first when its servers are busy. Wait a few "
             "minutes and run again, or switch the brain to publik API in Settings."
         )
 
+    def _pace(self, model: str) -> None:
+        """Hold the next call until the model's known per-minute limit allows it."""
+        interval = self._interval.get(model, 0.0)
+        if interval:
+            wait = self._last_call_at + interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+        self._last_call_at = time.monotonic()
+
+    def _slow_down(self, model: str, hit: QuotaHit, wait: float) -> None:
+        """A per-minute 429: space this model's calls to the limit Google named
+        (5 a minute on a free flash key) and say so under JUDGE."""
+        rpm = hit.limit if hit.limit and 0 < hit.limit <= 120 else QUOTA_DEFAULT_RPM
+        interval = 60.0 / rpm + 0.5
+        first = model not in self._interval
+        self._interval[model] = max(self._interval.get(model, 0.0), interval)
+        if self.notify:
+            pacing = f", then one call every {interval:.0f} s" if first else ""
+            self.notify(
+                f"Gemini {model}: your key allows {rpm} requests a minute; "
+                f"waiting {wait:.0f} s{pacing}"
+            )
+
     def _try_model(self, model: str, body: dict, headers: dict) -> tuple[str, Any]:
         """Up to three tries on one model. ("ok", data) on success; ("next",
         reason) when this model is the problem and the next one should be
-        tried; raises LlmError when trying another model cannot help."""
+        tried; raises LlmError when trying another model cannot help.
+
+        A per-minute 429 is not a strike: the model is fine, we were early.
+        Wait what Google asked for and ask again. A per-day 429 is final for
+        the day: straight to the next model, which has its own quota."""
         url = self.endpoint.url(model)
         last_err: Exception | None = None
-        for attempt in range(3):
-            if attempt:
-                time.sleep(GEMINI_RETRY_WAITS[attempt - 1])
+        strikes = 0
+        waits = 0
+        while strikes < 3:
+            if strikes:
+                time.sleep(GEMINI_RETRY_WAITS[strikes - 1])
+            self._pace(model)
             try:
                 res = httpx.post(url, headers=headers, json=body, timeout=LLM_TIMEOUT)
             except httpx.HTTPError as err:
                 last_err = err  # the network, not the model
+                strikes += 1
                 continue
             status = res.status_code
             if status in (401, 403):
@@ -431,26 +612,34 @@ class GeminiClient:
                 # it will say so again, so straight to the next model.
                 return "next", f"404 {_error_message(res, 'model not found')}"
             if status == 429:
-                detail = _error_message(res, "rate limited")
-                if "credit" in detail.lower() or "billing" in detail.lower():
-                    raise LlmError(f"Gemini 429: {detail}")
-                last_err = LlmError(f"429 {detail}")
+                hit = _quota_hit(res)
+                if hit.scope == "day":
+                    self._day_out[model] = hit
+                    return "next", hit.describe()
+                if waits >= QUOTA_WAITS_PER_CALL:
+                    return "next", f"still {hit.describe()} after {waits} waits"
+                waits += 1
+                asked = hit.retry_after if hit.retry_after is not None else QUOTA_DEFAULT_WAIT
+                wait = min(asked, QUOTA_WAIT_CAP) + 1.0
+                self._slow_down(model, hit, wait)
+                time.sleep(wait)
                 continue
             if status >= 500:
                 last_err = LlmError(f"{status} {_error_message(res, 'server error')}")
+                strikes += 1
                 continue
             try:
                 res.raise_for_status()
                 data = _parse_answer(res)
             except (httpx.HTTPError, KeyError, json.JSONDecodeError, IndexError) as err:
                 last_err = err
+                strikes += 1
                 continue
             return "ok", data
         if isinstance(last_err, LlmError):
-            # three 5xx or quota answers in a row: this model's problem
+            # three 5xx answers in a row: this model's problem
             return "next", str(last_err)
         raise LlmError(f"Gemini call failed after retries: {last_err}")
-
 
 class OllamaClient:
     backend = "ollama"

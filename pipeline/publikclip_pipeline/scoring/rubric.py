@@ -63,6 +63,42 @@ T2_SCHEMA: dict[str, Any] = {
 }
 
 
+# Several moments per call (Gemini-class brains only). ~35 single calls per
+# video were the bulk of JUDGE's spend, and a free Gemini key gets 20 a day
+# on the flash alias (Oct 11 2026 report). The same rubric, one array answer,
+# each entry tagged with the moment's index so nothing is matched by order.
+T1_BATCH_SIZE = 5
+
+T1_BATCH_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "moments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {
+                        "type": "integer",
+                        "description": "the moment's index, copied from its heading",
+                    },
+                    **T1_SCHEMA["properties"],
+                },
+                "required": ["index", *T1_SCHEMA["required"]],
+            },
+        }
+    },
+    "required": ["moments"],
+}
+
+T1_RULES = (
+    "Score each dimension honestly. Most clips are mediocre; 8+ on any "
+    "dimension should be rare. hook rates ONLY the first ~3 seconds. "
+    "shock is about content (surprising/taboo), independent of hook. "
+    "punchline_index is the 0-based index (counting every word in order) "
+    "of the word where the biggest laugh lands, or -1."
+)
+
+
 def t1_prompt(transcript_text: str, context: dict) -> str:
     """The candidate's transcript plus the local evidence the LLM is allowed
     to see (events summary) — but the LLM never sees the heatmap or arousal
@@ -75,12 +111,46 @@ def t1_prompt(transcript_text: str, context: dict) -> str:
         f"Speakers and transcript ({context.get('duration', 0):.0f} seconds):\n"
         f"{transcript_text}\n\n"
         f"Audio events detected in this span: {events_desc}\n\n"
-        "Score each dimension honestly. Most clips are mediocre; 8+ on any "
-        "dimension should be rare. hook rates ONLY the first ~3 seconds. "
-        "shock is about content (surprising/taboo), independent of hook. "
-        "punchline_index is the 0-based index (counting every word in order) "
-        "of the word where the biggest laugh lands, or -1."
+        + T1_RULES
     )
+
+
+def t1_batch_prompt(moments: list[tuple[int, str, dict]]) -> str:
+    """Several candidates in one call: (index, transcript, context) each.
+    Same rules as t1_prompt; the answer is one entry per moment with its
+    index copied back."""
+    blocks = []
+    for index, transcript_text, context in moments:
+        events_desc = context.get("events_desc", "none detected")
+        blocks.append(
+            f"=== Moment {index} ({context.get('duration', 0):.0f} seconds) ===\n"
+            f"Speakers and transcript:\n{transcript_text}\n\n"
+            f"Audio events detected in this span: {events_desc}"
+        )
+    return (
+        "You are rating candidate short-form clips cut from one longer video. "
+        f"There are {len(moments)} moments below. Rate each moment ONLY on its own "
+        "transcript — do not assume missing context makes it better, and do not let "
+        "one moment's rating depend on another's.\n\n"
+        + "\n\n".join(blocks)
+        + "\n\n"
+        + T1_RULES
+        + " Return one entry per moment, in the same order, with its index copied exactly."
+    )
+
+
+def t1_entry_ok(entry: Any) -> bool:
+    """A batch answer's entry is usable only when it is complete: a missing
+    field here means that moment is scored again on its own."""
+    if not isinstance(entry, dict):
+        return False
+    if not all(k in entry for k in T1_SCHEMA["required"]):
+        return False
+    try:
+        int(entry.get("index"))
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 # --- Cross-validation multipliers (v1 design values) ------------------------

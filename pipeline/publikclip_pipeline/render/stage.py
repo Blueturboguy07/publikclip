@@ -88,7 +88,8 @@ class RenderStage(Stage):
             ]
             ass_path = out_dir / f"clip_{i:02d}.ass"
             ass_path.write_text(
-                ass_mod.build_ass(words, clip_events, preset_name=preset, emoji_ok=emoji_ok)
+                ass_mod.build_ass(words, clip_events, preset_name=preset, emoji_ok=emoji_ok),
+                encoding="utf-8",
             )
 
             out_path = out_dir / f"clip_{i:02d}.mp4"

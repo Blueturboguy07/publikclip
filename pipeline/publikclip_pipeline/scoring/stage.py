@@ -24,6 +24,63 @@ from . import rubric
 SELECT_COUNT = 12
 
 
+def _chunks(items: list, size: int) -> list[list]:
+    size = max(1, size)
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _score_t1(client, items: list[dict], batch_size: int, ctx: StageContext) -> dict[int, dict]:
+    """T1 rubric answers keyed by candidate index. Gemini-class brains rate
+    T1_BATCH_SIZE moments per call; a moment the batch answer skipped or
+    returned incomplete is rated again on its own, so a sloppy answer costs
+    one more call, never a lost moment. Ollama rates one at a time."""
+    out: dict[int, dict] = {}
+    total = len(items)
+    done = 0
+    for chunk in _chunks(items, batch_size):
+        if len(chunk) > 1:
+            ctx.emit(done / max(1, total) * 0.6, f"Scoring moments {done + 1}–{done + len(chunk)} of {total}…")
+        else:
+            ctx.emit(done / max(1, total) * 0.6, f"Scoring moment {done + 1}/{total}…")
+        leftovers = list(chunk)
+        if len(chunk) > 1:
+            prompt = rubric.t1_batch_prompt([(it["i"], it["labeled"], it["context"]) for it in chunk])
+            try:
+                answer = client.generate_json(prompt, rubric.T1_BATCH_SCHEMA)
+            except llm_mod.LlmError as err:
+                raise StageError(str(err)) from err
+            except Exception as err:  # noqa: BLE001 — fall back to one call per moment
+                ctx.emit(-1, f"batch scoring failed, scoring one by one: {err}")
+                answer = None
+            if isinstance(answer, dict):
+                by_index = {
+                    int(entry["index"]): entry
+                    for entry in (answer.get("moments") or [])
+                    if rubric.t1_entry_ok(entry)
+                }
+                leftovers = []
+                for it in chunk:
+                    entry = by_index.get(it["i"])
+                    if entry is None:
+                        leftovers.append(it)
+                    else:
+                        out[it["i"]] = entry
+        for it in leftovers:
+            try:
+                out[it["i"]] = client.generate_json(
+                    rubric.t1_prompt(it["labeled"], it["context"]), rubric.T1_SCHEMA
+                )
+            except llm_mod.LlmError as err:
+                # StageError, not a bare re-raise: the CLI turns it into the
+                # {"ok": false, "error": …} result the app shows (a 402's
+                # top-up link included) instead of a crashed sidecar.
+                raise StageError(str(err)) from err
+            except Exception as err:  # noqa: BLE001
+                ctx.emit(-1, f"moment {it['i'] + 1} scoring failed, skipping: {err}")
+        done += len(chunk)
+    return out
+
+
 def _transcript_slice(segments: list[dict], start: float, end: float) -> tuple[str, str]:
     """(speaker-labeled transcript, flat text) for a window."""
     lines: list[str] = []
@@ -107,29 +164,33 @@ class ScoreStage(Stage):
         cv_constants = scoring_config["constants"]
 
         candidates = cands["candidates"]
-        scored: list[dict] = []
+        # Moments with too few words never cost a call.
+        items: list[dict] = []
         for i, cand in enumerate(candidates):
             start, end = cand["start"], cand["end"]
-            ctx.emit(i / max(1, len(candidates)) * 0.6, f"Scoring moment {i + 1}/{len(candidates)}…")
             labeled, flat = _transcript_slice(segments, start, end)
             if len(flat.split()) < 20:
                 continue
             window_events = _events_in(timeline, start, end)
-            near_laughs = [e for e in _events_in(timeline, start, end, pad=3.0) if e["type"] == "laugh"]
-            context = {
-                "duration": end - start,
-                "events_desc": _events_desc(window_events),
-            }
-            try:
-                t1 = client.generate_json(rubric.t1_prompt(labeled, context), rubric.T1_SCHEMA)
-            except llm_mod.LlmError as err:
-                # StageError, not a bare re-raise: the CLI turns it into the
-                # {"ok": false, "error": …} result the app shows (a 402's
-                # top-up link included) instead of a crashed sidecar.
-                raise StageError(str(err)) from err
-            except Exception as err:  # noqa: BLE001
-                ctx.emit(-1, f"moment {i + 1} scoring failed, skipping: {err}")
+            items.append(
+                {
+                    "i": i,
+                    "cand": cand,
+                    "labeled": labeled,
+                    "context": {"duration": end - start, "events_desc": _events_desc(window_events)},
+                }
+            )
+        batch_size = rubric.T1_BATCH_SIZE if client.backend == "gemini" else 1
+        t1_by_index = _score_t1(client, items, batch_size, ctx)
+
+        scored: list[dict] = []
+        for item in items:
+            i, cand, labeled = item["i"], item["cand"], item["labeled"]
+            t1 = t1_by_index.get(i)
+            if t1 is None:
                 continue
+            start, end = cand["start"], cand["end"]
+            near_laughs = [e for e in _events_in(timeline, start, end, pad=3.0) if e["type"] == "laugh"]
 
             arousal_pct = _window_pct(arousal, arousal_grid, start, end)
             heatmap_pct = (

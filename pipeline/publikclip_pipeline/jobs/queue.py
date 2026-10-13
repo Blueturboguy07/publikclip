@@ -16,6 +16,7 @@ half-checkpoint that resume would trust.
 from __future__ import annotations
 
 import json
+import locale
 import sqlite3
 import time
 import uuid
@@ -136,9 +137,28 @@ def set_job_status(job_id: str, status: str, error: str | None = None, title: st
 
 
 def _atomic_write_json(path: Path, payload: Any) -> None:
+    # encoding= is not optional: Python's default on Windows is the ANSI code
+    # page, so a checkpoint with an em-dash in a summary was not valid UTF-8
+    # and the app's reader (Rust, strict UTF-8) dropped the whole stage —
+    # the Oct 2 2026 "12 clips, no video, scored by —" report.
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1))
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(path)
+
+
+def read_text_compat(path: Path) -> str:
+    """UTF-8, with a way back for files written before 0.2.6 on Windows in
+    the ANSI code page: those decode with the local code page, replacing
+    what cannot be mapped, so an old job still resumes and still opens."""
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode(locale.getpreferredencoding(False) or "cp1252", errors="replace")
+
+
+def read_json_compat(path: Path) -> Any:
+    return json.loads(read_text_compat(path))
 
 
 def checkpoint_path(job: Job, stage: str) -> Path:
@@ -171,7 +191,7 @@ def read_checkpoint(job: Job, stage: str, schema_version: int) -> dict | None:
     if not path.exists():
         return None
     try:
-        envelope = json.loads(path.read_text())
+        envelope = read_json_compat(path)
     except (json.JSONDecodeError, OSError):
         return None
     if envelope.get("schema_version") != schema_version:

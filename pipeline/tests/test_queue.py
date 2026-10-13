@@ -158,3 +158,37 @@ def test_failure_then_resume_skips_completed_stages():
     assert counting.runs == 1  # not re-run
     assert results["failing"] == {"ok": True}
     assert queue.get_job(job.id).status == "done"
+
+
+# --- checkpoint encoding --------------------------------------------------------
+#
+# Oct 2 2026, Windows: a score.json whose summary held an em-dash was written
+# in the ANSI code page (Python's default there), the app's strict-UTF-8
+# reader rejected it, and the review bay showed 12 scored cards with no video
+# and "scored by —". Checkpoints are UTF-8 on every platform now, and the
+# ones already written that way still read.
+
+
+def test_checkpoint_bytes_are_utf8_on_every_platform():
+    job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
+    data = {"summary": "café — 😂 Čakovec", "title": "naïve"}
+    queue.write_checkpoint(job, "score", 1, data)
+    raw = queue.checkpoint_path(job, "score").read_bytes()
+    assert json.loads(raw.decode("utf-8"))["data"] == data
+    assert "café".encode("utf-8") in raw  # raw characters, not \\u escapes, and UTF-8 bytes
+    assert queue.read_checkpoint(job, "score", 1) == data
+
+
+def test_checkpoint_written_in_the_ansi_code_page_still_reads():
+    job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
+    path = queue.checkpoint_path(job, "score")
+    envelope = {"stage": "score", "schema_version": 1, "created_at": 0, "data": {"summary": "a — b"}}
+    path.write_bytes(json.dumps(envelope, ensure_ascii=False).encode("cp1252"))
+    data = queue.read_checkpoint(job, "score", 1)
+    assert data is not None and data["summary"].startswith("a ") and data["summary"].endswith(" b")
+
+
+def test_read_text_compat_prefers_utf8(tmp_path):
+    p = tmp_path / "t.txt"
+    p.write_bytes("Čakovec — 😂".encode("utf-8"))
+    assert queue.read_text_compat(p) == "Čakovec — 😂"
