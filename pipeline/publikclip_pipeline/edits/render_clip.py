@@ -18,6 +18,7 @@ from pathlib import Path
 from .. import config
 from ..audio_library import library as audio_lib
 from ..captions import ass as ass_mod
+from ..jobs import queue
 from ..render import ffmpeg_bin, renderer
 from . import audio_suggest, store
 from .timeline import AudioItem, ClipEdit, TimeRemap, detect_dead_space, keep_ranges
@@ -36,7 +37,7 @@ ALOOP_MAX_SIZE = 2_000_000_000
 
 
 def _load_stage(job_dir: Path, stage: str) -> dict:
-    return json.loads((job_dir / f"{stage}.json").read_text())["data"]
+    return queue.read_json_compat(job_dir / f"{stage}.json")["data"]
 
 
 def context_for_clip(job_dir: Path, clip_idx: int, pad: float = 45.0) -> dict:
@@ -73,7 +74,7 @@ def context_for_clip(job_dir: Path, clip_idx: int, pad: float = 45.0) -> dict:
     trajectory = None
     camera_path = job_dir / "camera.json"
     if camera_path.exists():
-        cam = json.loads(camera_path.read_text())["data"]
+        cam = queue.read_json_compat(camera_path)["data"]
         traj_file = cam.get("trajectories", {}).get(str(clip_idx))
         if traj_file and Path(traj_file).exists():
             t = json.loads(Path(traj_file).read_text())
@@ -279,7 +280,7 @@ def _write_credits(out_dir: Path, clip_idx: int, audio_items: list[AudioItem], l
             lines.append(src.attribution)
     credits_path = out_dir / f"clip_{clip_idx:02d}.credits.txt"
     if lines:
-        credits_path.write_text("\n".join(lines) + "\n")
+        credits_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     else:
         credits_path.unlink(missing_ok=True)  # stale credits from a prior render
 
@@ -333,7 +334,7 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     diarize = _load_stage(job_dir, "diarize")
     events = _load_stage(job_dir, "events")
     score = _load_stage(job_dir, "score")
-    settings = config.Settings.from_json(json.loads((job_dir / "settings.json").read_text()))
+    settings = config.Settings.from_json(queue.read_json_compat(job_dir / "settings.json"))
     clip = score["clips"][clip_idx]
     edit = store.edit_for_clip(job_dir, clip_idx, clip)
 
@@ -391,7 +392,10 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     out_dir = job_dir / "clips"
     out_dir.mkdir(exist_ok=True)
     ass_path = out_dir / f"clip_{clip_idx:02d}.ass"
-    ass_path.write_text(ass_mod.build_ass(cap_words, clip_events_out, preset_name=preset, emoji_ok=emoji_ok))
+    ass_path.write_text(
+        ass_mod.build_ass(cap_words, clip_events_out, preset_name=preset, emoji_ok=emoji_ok),
+        encoding="utf-8",
+    )
 
     # --- build the graph ----------------------------------------------------
     emit(-1, "Rendering clip…")
@@ -473,7 +477,7 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     # keep render.json in sync so the review UI reflects the new file
     render_ckpt_path = job_dir / "render.json"
     if render_ckpt_path.exists():
-        ckpt = json.loads(render_ckpt_path.read_text())
+        ckpt = queue.read_json_compat(render_ckpt_path)
         outputs = ckpt["data"].get("outputs", [])
         for i, o in enumerate(outputs):
             if o["clip"] == clip_idx:
@@ -482,6 +486,6 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
         else:
             outputs.append(entry)
         tmp = render_ckpt_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(ckpt))
+        tmp.write_text(json.dumps(ckpt, ensure_ascii=False), encoding="utf-8")
         tmp.replace(render_ckpt_path)
     return entry

@@ -490,17 +490,195 @@ def test_gemini_every_model_overloaded_is_one_human_line(monkeypatch):
     assert "Server error" not in text  # not httpx's wording
 
 
-def test_gemini_quota_429_moves_on_but_billing_429_stops(monkeypatch):
+# --- free-tier quotas ------------------------------------------------------------
+#
+# Oct 11 2026, Windows, free key: 5 requests a minute and 20 a day on the
+# flash alias, 10 a minute and 500 a day on the lite models (AI Studio).
+# Google's 429 names the quota (quotaId …PerMinute… / …PerDay…) and the
+# wait (retryDelay). The old code read "billing" in Google's standard text
+# ("check your plan and billing details") as a billing stop and died.
+
+GOOGLE_QUOTA_TEXT = (
+    "You exceeded your current quota, please check your plan and billing details. "
+    "For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits.\n"
+    "* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, "
+    "limit: {limit}, model: {model}\nPlease retry in {retry}."
+)
+
+
+def _quota_429(scope, limit, retry="15s", model="gemini-flash-latest", details=True):
+    quota_id = {
+        "minute": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+        "day": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+    }[scope]
+    body = {
+        "error": {
+            "code": 429,
+            "message": GOOGLE_QUOTA_TEXT.format(limit=limit, model=model, retry=retry),
+            "status": "RESOURCE_EXHAUSTED",
+        }
+    }
+    if details:
+        body["error"]["details"] = [
+            {
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [
+                    {
+                        "quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                        "quotaId": quota_id,
+                        "quotaDimensions": {"location": "global", "model": model},
+                        "quotaValue": str(limit),
+                    }
+                ],
+            },
+            {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry},
+        ]
+    return _Res(429, body)
+
+
+def _sleeps(monkeypatch):
+    slept = []
+    monkeypatch.setattr(llm_mod.time, "sleep", slept.append)
+    return slept
+
+
+def test_gemini_per_minute_429_waits_what_google_asked_and_keeps_the_model(monkeypatch):
     monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
-    quota = _Res(429, {"error": {"message": "Resource has been exhausted (e.g. check quota)."}})
-    calls = _capture(monkeypatch, [quota, quota, quota, _ok_text()])
+    slept = _sleeps(monkeypatch)
+    calls = _capture(monkeypatch, [_quota_429("minute", 5, "15s"), _ok_text()])
+    notes = []
+    client = llm_mod.make_client("gemini", notify=notes.append)
+    assert client.generate_json("p", SCHEMA) == {"ok": True}
+    assert [_model_of(c) for c in calls] == ["gemini-flash-latest", "gemini-flash-latest"]
+    assert client.model == "gemini-flash-latest"
+    assert slept and abs(slept[0] - 16.0) < 0.01  # Google's 15 s plus one
+    assert "5 requests a minute" in notes[0] and "waiting 16 s" in notes[0]
+
+
+def test_gemini_standard_quota_text_is_not_a_billing_stop(monkeypatch):
+    """The regression: "billing details" in Google's own wording."""
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    _sleeps(monkeypatch)
+    calls = _capture(monkeypatch, [_quota_429("minute", 5, "15s", details=False), _ok_text()])
     assert llm_mod.make_client("gemini").generate_json("p", SCHEMA) == {"ok": True}
-    assert _model_of(calls[-1]) == "gemini-flash-lite-latest"
-    billing = _Res(429, {"error": {"message": "Your billing account has no credits."}})
-    calls = _capture(monkeypatch, [billing])
-    with pytest.raises(llm_mod.LlmError) as exc:
-        llm_mod.make_client("gemini").generate_json("q", SCHEMA)
-    assert len(calls) == 1 and "credits" in str(exc.value)
+    assert len(calls) == 2 and _model_of(calls[-1]) == "gemini-flash-latest"
+
+
+def test_gemini_paces_the_model_after_a_per_minute_hit(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    slept = _sleeps(monkeypatch)
+    clock = [1000.0]
+    monkeypatch.setattr(llm_mod.time, "monotonic", lambda: clock[0])
+    _capture(monkeypatch, [_quota_429("minute", 5, "15s"), _ok_text()])
+    client = llm_mod.make_client("gemini")
+    client.generate_json("moment 1", SCHEMA)
+    _capture(monkeypatch, [_ok_text()])
+    clock[0] += 2.0  # two seconds later: too soon for 5 a minute
+    client.generate_json("moment 2", SCHEMA)
+    assert abs(slept[-1] - (60.0 / 5 + 0.5 - 2.0)) < 0.01
+
+
+def test_gemini_per_day_429_moves_to_the_next_model_at_once(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    slept = _sleeps(monkeypatch)
+    calls = _capture(monkeypatch, [_quota_429("day", 20, "39599.4s"), _ok_text()])
+    notes = []
+    client = llm_mod.make_client("gemini", notify=notes.append)
+    assert client.generate_json("p", SCHEMA) == {"ok": True}
+    assert [_model_of(c) for c in calls] == ["gemini-flash-latest", "gemini-flash-lite-latest"]
+    assert slept == []  # no strike waits: the day is over for that model
+    assert "today's free requests used (20 a day)" in notes[0]
+    assert "in about 11 h" in notes[0] and "trying gemini-flash-lite-latest" in notes[0]
+
+
+def test_gemini_day_out_model_is_not_asked_again_this_run(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    _sleeps(monkeypatch)
+    _capture(monkeypatch, [_quota_429("day", 20, "39599s"), _ok_text()])
+    client = llm_mod.make_client("gemini")
+    client.generate_json("moment 1", SCHEMA)
+    calls = _capture(monkeypatch, [_ok_text()])
+    client.generate_json("moment 2", SCHEMA)
+    assert [_model_of(c) for c in calls] == ["gemini-flash-lite-latest"]
+
+
+def test_gemini_every_model_out_for_the_day_names_the_reset(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    _sleeps(monkeypatch)
+    calls = _capture(monkeypatch, [_quota_429("day", 20, "39599s")])
+    with pytest.raises(llm_mod.QuotaExhaustedError) as exc:
+        llm_mod.make_client("gemini").generate_json("p", SCHEMA)
+    assert len(calls) == 1 + len(llm_mod.GEMINI_FALLBACK_MODELS)  # one each, no retries
+    text = str(exc.value)
+    assert "today's free requests on every model" in text
+    assert "midnight Pacific" in text and "in about 11 h" in text
+    assert "Resume the job" in text and "publik API" in text
+
+
+def test_gemini_day_out_everywhere_fails_fast_on_the_same_client(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    _sleeps(monkeypatch)
+    _capture(monkeypatch, [_quota_429("day", 20, "39599s")])
+    client = llm_mod.make_client("gemini")
+    with pytest.raises(llm_mod.QuotaExhaustedError):
+        client.generate_json("p", SCHEMA)
+    calls = _capture(monkeypatch, [_ok_text()])
+    with pytest.raises(llm_mod.QuotaExhaustedError):
+        client.generate_json("q", SCHEMA)
+    assert calls == []
+
+
+def test_gemini_unlabeled_429_waits_then_gives_the_model_up(monkeypatch):
+    """A bare 429 with no details and no wait: treated as a per-minute
+    limit, waited out a few times, then the next model."""
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    slept = _sleeps(monkeypatch)
+    bare = _Res(429, {"error": {"message": "Resource has been exhausted (e.g. check quota)."}})
+    calls = _capture(monkeypatch, [bare, bare, bare, bare, bare, _ok_text()])
+    assert llm_mod.make_client("gemini").generate_json("p", SCHEMA) == {"ok": True}
+    assert [_model_of(c) for c in calls] == ["gemini-flash-latest"] * 5 + ["gemini-flash-lite-latest"]
+    # four quota waits of 15 s + 1; the other sleeps are the pacing between tries
+    quota_waits = [s for s in slept if abs(s - (llm_mod.QUOTA_DEFAULT_WAIT + 1)) < 0.01]
+    assert len(quota_waits) == llm_mod.QUOTA_WAITS_PER_CALL
+    assert all(s <= 60.0 / llm_mod.QUOTA_DEFAULT_RPM + 0.5 + 0.01 for s in slept if s not in quota_waits)
+
+
+def test_gemini_long_unlabeled_wait_is_read_as_a_daily_quota(monkeypatch):
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    slept = _sleeps(monkeypatch)
+    calls = _capture(monkeypatch, [_quota_429("day", 20, "72000s", details=False), _ok_text()])
+    assert llm_mod.make_client("gemini").generate_json("p", SCHEMA) == {"ok": True}
+    assert [_model_of(c) for c in calls] == ["gemini-flash-latest", "gemini-flash-lite-latest"]
+    assert slept == []
+
+
+def test_gemini_cached_answer_from_any_model_needs_no_call(monkeypatch):
+    """Resume after a model switch: yesterday's lite answers are found
+    before the flash alias is asked (and charged) again."""
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    _sleeps(monkeypatch)
+    _capture(monkeypatch, [_quota_429("day", 20, "39599s"), _ok_text({"from": "lite"})])
+    llm_mod.make_client("gemini").generate_json("moment 1", SCHEMA)
+    calls = _capture(monkeypatch, [_ok_text({"from": "flash"})])
+    fresh = llm_mod.make_client("gemini")  # a resumed job starts at the top of the ladder
+    assert fresh.generate_json("moment 1", SCHEMA) == {"from": "lite"}
+    assert calls == []
+
+
+def test_quota_hit_parser_reads_details_then_words():
+    day = _quota_429("day", 20, "39599.4s")
+    hit = llm_mod._quota_hit(day)
+    assert (hit.scope, hit.limit, hit.retry_after) == ("day", 20, 39599.4)
+    minute = _quota_429("minute", 5, "15s", details=False)
+    hit = llm_mod._quota_hit(minute)
+    assert (hit.scope, hit.limit, hit.retry_after) == ("minute", 5, 15.0)
+    both = _quota_429("minute", 5, "30s")
+    both._body["error"]["details"][0]["violations"].append(
+        {"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier", "quotaValue": "20"}
+    )
+    assert llm_mod._quota_hit(both).scope == "day"
+    assert llm_mod._quota_hit(_Res(429, {"error": {"message": "slow down"}})).scope == "unknown"
+    assert llm_mod._quota_hit(_Res(429, "not json")).scope == "unknown"
 
 
 def test_gemini_network_timeout_does_not_cascade_through_models(monkeypatch):

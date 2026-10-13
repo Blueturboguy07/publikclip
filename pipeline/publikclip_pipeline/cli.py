@@ -324,12 +324,12 @@ def cmd_edit(args: argparse.Namespace) -> int:
         return 0
 
     if args.edit_cmd == "suggest-visuals":
-        score = json.loads((job_dir / "score.json").read_text())["data"]
+        score = queue.read_json_compat(job_dir / "score.json")["data"]
         clip = score["clips"][args.clip]
         edit = store.edit_for_clip(job_dir, args.clip, clip)
         # plan against OUTPUT-time words = current bounds without dead-space
         # (suggestions land on the source-bounds timeline the UI shows)
-        diarize = json.loads((job_dir / "diarize.json").read_text())["data"]
+        diarize = queue.read_json_compat(job_dir / "diarize.json")["data"]
         words = [
             {"word": w["word"], "start": w["start"] - edit.start, "end": w["end"] - edit.start}
             for seg in diarize["segments"]

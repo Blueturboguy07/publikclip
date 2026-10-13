@@ -72,7 +72,20 @@ pub(crate) fn quiet_command(program: &str) -> Command {
     if !cfg!(debug_assertions) {
         cmd.env("PUBLIKCLIP_UV", packaged_uv());
     }
+    // Python on Windows defaults to the ANSI code page for every text file
+    // and pipe. The pipeline names its encodings now (0.2.6), but this keeps
+    // every library it drives (yt-dlp titles, whisperX output) on UTF-8 too.
+    cmd.env("PYTHONUTF8", "1");
     cmd
+}
+
+/// A checkpoint as text. Jobs written by publikclip 0.2.5 and earlier on
+/// Windows are in the ANSI code page (Python's default there), so a summary
+/// with an em-dash made `read_to_string` reject the whole stage and the
+/// review bay showed 12 scored cards with no video (Oct 2 2026 report).
+/// Invalid bytes become U+FFFD; the JSON around them is ASCII and survives.
+fn read_text_lossy(path: &std::path::Path) -> Option<String> {
+    fs::read(path).ok().map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// The `resources` dir of a packaged build. macOS keeps it in the .app's
@@ -236,7 +249,20 @@ fn should_emit_exited(success: bool, saw_result: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::should_emit_exited;
+    use super::{read_text_lossy, should_emit_exited};
+
+    #[test]
+    fn ansi_checkpoint_from_an_older_windows_build_still_parses() {
+        let dir = std::env::temp_dir().join(format!("publikclip-lossy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("score.json");
+        // cp1252 em-dash (0x97) inside a JSON string: not valid UTF-8
+        std::fs::write(&path, b"{\"data\": {\"summary\": \"a \x97 b\"}}").unwrap();
+        let text = read_text_lossy(&path).expect("read");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("still JSON");
+        assert_eq!(value["data"]["summary"].as_str().unwrap(), "a \u{FFFD} b");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn structured_failure_does_not_become_generic_exit() {
@@ -263,8 +289,7 @@ fn job_results(job_id: String) -> Result<Value, String> {
         return Err(format!("no job dir for {job_id}"));
     }
     let read_stage = |name: &str| -> Value {
-        fs::read_to_string(dir.join(format!("{name}.json")))
-            .ok()
+        read_text_lossy(&dir.join(format!("{name}.json")))
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .and_then(|v| v.get("data").cloned())
             .unwrap_or(Value::Null)
@@ -291,8 +316,7 @@ fn list_job_dirs() -> Result<Vec<Value>, String> {
             let dir = entry.path();
             let has_render = dir.join("render.json").exists();
             let has_ingest = dir.join("ingest.json").exists();
-            let title = fs::read_to_string(dir.join("ingest.json"))
-                .ok()
+            let title = read_text_lossy(&dir.join("ingest.json"))
                 .and_then(|s| serde_json::from_str::<Value>(&s).ok())
                 .and_then(|v| v["data"]["title"].as_str().map(String::from));
             out.push(json!({
