@@ -665,6 +665,39 @@ def test_gemini_cached_answer_from_any_model_needs_no_call(monkeypatch):
     assert calls == []
 
 
+# Verbatim from the Oct 11 2026 screenshot (the app shows error.message only).
+AYAAN_429 = (
+    "You exceeded your current quota, please check your plan and billing details. For more "
+    "information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To "
+    "monitor your current usage, head to: https://ai.dev/rate-limit. * Quota exceeded for metric: "
+    "generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: "
+    "gemini-3.8-flash\nPlease retry in 20h20m4.321946213s."
+)
+
+
+def test_the_screenshot_message_alone_is_read_as_a_daily_quota(monkeypatch):
+    """No structured details at all: the words still say 20 a day, 20 h."""
+    hit = llm_mod._quota_hit(_Res(429, {"error": {"message": AYAAN_429}}))
+    assert hit.scope == "day" and hit.limit == 20
+    assert abs(hit.retry_after - (20 * 3600 + 20 * 60 + 4.321946213)) < 0.001
+    assert "resets in about 20 h" in hit.describe()
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    slept = _sleeps(monkeypatch)
+    calls = _capture(monkeypatch, [_Res(429, {"error": {"message": AYAAN_429}}), _ok_text()])
+    assert llm_mod.make_client("gemini").generate_json("p", SCHEMA) == {"ok": True}
+    assert [_model_of(c) for c in calls] == ["gemini-flash-latest", "gemini-flash-lite-latest"]
+    assert slept == []
+
+
+def test_duration_spellings():
+    assert llm_mod._seconds("15s") == 15.0
+    assert llm_mod._seconds("39599.4s") == 39599.4
+    assert llm_mod._seconds("20h20m4.321946213s") == 20 * 3600 + 20 * 60 + 4.321946213
+    assert llm_mod._seconds("2m") == 120.0 and llm_mod._seconds("1h") == 3600.0
+    assert llm_mod._seconds("30") == 30.0
+    assert llm_mod._seconds("soon") is None and llm_mod._seconds("") is None
+
+
 def test_quota_hit_parser_reads_details_then_words():
     day = _quota_429("day", 20, "39599.4s")
     hit = llm_mod._quota_hit(day)

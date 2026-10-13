@@ -343,12 +343,25 @@ class QuotaHit:
         return f"429 {self.message}"
 
 
+_DURATION = re.compile(
+    r"^\s*(?:(\d+(?:\.\d+)?)h)?\s*(?:(\d+(?:\.\d+)?)m)?\s*(?:(\d+(?:\.\d+)?)s?)?\s*$"
+)
+
+
 def _seconds(value: Any) -> float | None:
-    """'15s', '39599.4s' or a bare number → seconds."""
+    """Google's two spellings of a wait: the structured retryDelay ('15s',
+    '39599.4s') and the message's own ('20h20m4.321946213s', seen in an
+    Oct 11 2026 screenshot). A bare number is seconds."""
     if value is None:
         return None
-    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*s?\s*$", str(value))
-    return float(m.group(1)) if m else None
+    text = str(value).strip()
+    if not text:
+        return None
+    m = _DURATION.match(text)
+    if not m or not any(m.groups()):
+        return None
+    hours, minutes, seconds = (float(g) if g else 0.0 for g in m.groups())
+    return hours * 3600 + minutes * 60 + seconds
 
 
 def _in_about(seconds: float) -> str:
@@ -396,9 +409,9 @@ def _quota_hit(res: httpx.Response) -> QuotaHit:
                     minute_limit = number if number is not None else minute_limit
     low = message.lower()
     if retry_after is None:
-        m = re.search(r"retry in (\d+(?:\.\d+)?)\s*s", low)
+        m = re.search(r"retry in ([\dhms.\s]+?)[.\s]*(?:$|\n)", low)
         if m:
-            retry_after = float(m.group(1))
+            retry_after = _seconds(m.group(1).strip().rstrip("."))
     if scope == "unknown":
         if "per day" in low or "perday" in low or "daily" in low:
             scope = "day"
