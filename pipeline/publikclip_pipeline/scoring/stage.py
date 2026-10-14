@@ -461,7 +461,17 @@ class ScoreStage(Stage):
         # not: the backtest harness measures the whole ranking against replay
         # data, and the review UI can one day show "also considered".
         shortlist = [
-            {"start": e["start"], "end": e["end"], "text_score": round(_text_rank(e), 1)}
+            {
+                "start": e["start"],
+                "end": e["end"],
+                "text_score": round(_text_rank(e), 1),
+                "source": e["source"],
+                "brain_rank": e.get("brain_rank"),
+                "subscores": e["subscores"],
+                "activity_coverage": e["activity_coverage"],
+                "rules": [a["rule"] for a in e["adjustments"]],
+                "summary": e["summary"][:120],
+            }
             for e in scored
         ]
         finalists = _distinct(scored, SELECT_COUNT)
