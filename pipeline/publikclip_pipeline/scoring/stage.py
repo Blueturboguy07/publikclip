@@ -20,6 +20,7 @@ from . import constants as constants_mod
 from . import frames as frames_mod
 from . import llm as llm_mod
 from . import propose as propose_mod
+from . import rank as rank_mod
 from . import rubric
 
 SELECT_COUNT = 12
@@ -347,6 +348,11 @@ class ScoreStage(Stage):
                     "speech_coverage": round(coverage, 3),
                     "laugh_detector_alive": laugh_detector_alive,
                     "source": cand.get("source", "curve"),
+                    "title": cand.get("title", ""),
+                    "events_in_window": sorted(
+                        {e["type"] for e in _events_in(timeline, start, end) if e["type"] != "pause"}
+                    ),
+                    "i": i,
                     "summary": t1.get("summary", ""),
                     "transcript": labeled,
                 }
@@ -362,8 +368,25 @@ class ScoreStage(Stage):
                 constants=cv_constants,
                 speech_coverage=entry["speech_coverage"],
                 self_contained=entry["t1_raw"].get("self_contained"),
+                brain_rank=entry.get("brain_rank"),
             )
             return max(scores.values())
+
+        # T1.5: the brain sees every rated moment side by side and picks the
+        # ones worth sending; its pick order is a recorded composite bonus.
+        try:
+            picks, whys = rank_mod.rank(
+                client, [(e["i"], e) for e in scored], rank_mod.RANK_POOL, ctx.emit
+            )
+        except llm_mod.LlmError as err:
+            raise StageError(str(err)) from err
+        except Exception as err:  # noqa: BLE001 — the rubric order still stands
+            ctx.emit(-1, f"Ranking the moments side by side failed, keeping the rubric order: {err}")
+            picks, whys = {}, {}
+        for entry in scored:
+            if entry["i"] in picks:
+                entry["brain_rank"] = picks[entry["i"]]
+                entry["brain_why"] = whys.get(entry["i"], "")
 
         scored.sort(key=_text_rank, reverse=True)
         # Every rated candidate with its pre-visual rank score, finalists or
@@ -406,6 +429,8 @@ class ScoreStage(Stage):
                 constants=cv_constants,
                 speech_coverage=entry["speech_coverage"],
                 self_contained=entry["t1_raw"].get("self_contained"),
+                brain_rank=entry.get("brain_rank"),
+                brain_why=entry.get("brain_why", ""),
             )
             entry["adjustments"].extend(comp_adjustments)
             entry["platform_scores"] = platform_scores
@@ -443,6 +468,8 @@ class ScoreStage(Stage):
         finalists.sort(key=lambda e: e["score"], reverse=True)
         for entry in finalists:
             entry.pop("transcript", None)  # bulky; review UI re-slices from diarize
+            entry.pop("i", None)
+            entry.pop("events_in_window", None)
 
         return {
             "llm_mode": llm_mode,

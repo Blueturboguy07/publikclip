@@ -273,12 +273,16 @@ def composite(
     *,
     speech_coverage: float | None = None,
     self_contained: bool | None = None,
+    brain_rank: int | None = None,
+    brain_why: str = "",
 ) -> tuple[dict[str, float], list[dict]]:
     """Per-platform 0–100 scores + any composite-level adjustments.
 
     `speech_coverage` is the share of the clip's seconds with speech;
-    `self_contained` is the LLM's own answer. Both are None for clips scored
-    before these rules existed, so their stored scores replay unchanged."""
+    `self_contained` is the LLM's own answer; `brain_rank` is the 1-based
+    position the brain gave this moment when it ranked the whole pool
+    (None: not picked). All None for clips scored before these rules
+    existed, so their stored scores replay unchanged."""
     adjustments: list[dict] = []
     platform_scores: dict[str, float] = {}
     heatmap_boost = _c(constants, "heatmap_boost", HEATMAP_BOOST)
@@ -322,6 +326,20 @@ def composite(
                 "rule": "needs_context",
                 "factor": NEEDS_CONTEXT,
                 "reason": "the moment needs context from outside the clip",
+            }
+        )
+    if brain_rank is not None:
+        from . import rank as rank_mod
+
+        factor = round(rank_mod.bonus(brain_rank), 3)
+        for platform in platform_scores:
+            platform_scores[platform] = min(1.0, platform_scores[platform] * factor)
+        adjustments.append(
+            {
+                "rule": "brain_rank",
+                "factor": factor,
+                "reason": f"pick #{int(brain_rank)} when the brain ranked every moment side by side"
+                + (f": {brain_why}" if brain_why else ""),
             }
         )
     return {k: round(v * 100, 1) for k, v in platform_scores.items()}, adjustments
@@ -371,6 +389,7 @@ def recompute_platform_scores(entry: dict, constants: dict) -> dict[str, float] 
         constants=constants,
         speech_coverage=entry.get("speech_coverage") if new_rules else None,
         self_contained=t1.get("self_contained") if new_rules else None,
+        brain_rank=entry.get("brain_rank") if new_rules else None,
     )
     return scores
 
