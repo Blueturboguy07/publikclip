@@ -451,11 +451,24 @@ class ScoreStage(Stage):
             )
             return max(scores.values())
 
-        # T1.5: the brain sees every rated moment side by side and picks the
-        # ones worth sending; its pick order is a recorded composite bonus.
+        # T1.5: the brain sees every rated moment side by side — with two
+        # frames each when it can see — and picks the ones worth sending; its
+        # pick order is a recorded composite bonus.
+        rank_images: list[bytes] | None = None
+        if client.backend == "gemini" and len(scored) > 1:
+            ctx.emit(0.58, f"Pulling two frames from each of {len(scored)} moments…")
+            rank_images = []
+            for entry in scored:
+                imgs = frames_mod.extract_frames(
+                    ingest["media_path"], rank_mod.frame_times(entry), ctx.job_dir / "rankframes"
+                )
+                if len(imgs) != rank_mod.FRAMES_PER_CANDIDATE:
+                    rank_images = None  # all or nothing: the order must hold
+                    break
+                rank_images.extend(imgs)
         try:
             picks, whys = rank_mod.rank(
-                client, [(e["i"], e) for e in scored], rank_mod.RANK_POOL, ctx.emit
+                client, [(e["i"], e) for e in scored], rank_mod.RANK_POOL, ctx.emit, images=rank_images
             )
         except llm_mod.LlmError as err:
             raise StageError(str(err)) from err

@@ -178,3 +178,67 @@ def test_the_brains_pick_order_leads_the_finalists(monkeypatch, tmp_path):
     assert "=== Candidate 2 " in brain.prompts[0] and "Found as: a loudness peak" in brain.prompts[0]
     assert any("picked 2 moments" in m for m in messages)
     assert all("i" not in c and "events_in_window" not in c for c in clips)
+
+
+# --- frames ---------------------------------------------------------------------
+
+def test_frame_times_sit_near_the_setup_and_the_payoff():
+    assert rank.frame_times({"start": 100.0, "end": 140.0}) == [114.0, 134.0]
+
+
+def test_the_prompt_explains_the_frames_only_when_they_come_along():
+    entries = [(0, _entry(0, 20)), (1, _entry(30, 50))]
+    assert "frames per candidate" not in rank.rank_prompt(entries, 12)
+    with_frames = rank.rank_prompt(entries, 12, frames_per=2)
+    assert "After this text come 2 frames per candidate" in with_frames
+    assert "a talking head counts less than one" in with_frames
+
+
+def test_frames_are_sent_only_when_every_candidate_has_its_two():
+    class Seeing(Brain):
+        def generate_json(self, prompt, schema, images=None):
+            self.prompts.append((prompt, images))
+            return self.answer
+    entries = [(0, _entry(0, 20)), (1, _entry(30, 50))]
+    brain = Seeing(answer={"picks": [{"index": 1, "why": "the fall"}]})
+    rank.rank(brain, entries, 12, lambda f, m: None, images=[b"a", b"b", b"c", b"d"])
+    prompt, images = brain.prompts[-1]
+    assert images == [b"a", b"b", b"c", b"d"] and "2 frames per candidate" in prompt
+    rank.rank(brain, entries, 12, lambda f, m: None, images=[b"a", b"b", b"c"])  # one short
+    prompt, images = brain.prompts[-1]
+    assert images is None and "frames per candidate" not in prompt
+
+
+def test_the_stage_pulls_two_frames_per_rated_moment_for_the_ranker(monkeypatch, tmp_path):
+    curves = tmp_path / "curves.json"
+    curves.write_text(json.dumps({"arousal": [0.1] * 600, "arousal_grid_sec": 0.5}))
+    segments = [{"start": 0, "end": 300, "speaker": 0, "words": _words(0, 300)}]
+    cands = [{"start": 100.0 * i, "end": 100.0 * i + 42.0, "peak_time": 100.0 * i + 20, "curve_score": 0.5, "channel_scores": {}} for i in range(3)]
+
+    class Seeing(StageBrain):
+        def generate_json(self, prompt, schema, images=None):
+            if schema is rank.RANK_SCHEMA:
+                self.seen = images
+            return super().generate_json(prompt, schema, images)
+
+    brain = Seeing(picks=[{"index": 1, "why": "the fall"}])
+    monkeypatch.setattr(llm_mod, "make_client", lambda mode, notify=None: brain)
+    from publikclip_pipeline.scoring import frames as frames_mod
+    pulled = []
+
+    def fake_extract(media, times, tmp_dir):
+        pulled.append(list(times))
+        return [b"jpg%d" % len(pulled)] * len(times) if str(tmp_dir).endswith("rankframes") else []
+
+    monkeypatch.setattr(frames_mod, "extract_frames", fake_extract)
+    messages = []
+    ctx = SimpleNamespace(
+        prior={"ingest": {"heatmap": None, "probe": {"duration_sec": 300}, "media_path": str(tmp_path / "x.mp4")},
+               "diarize": {"segments": segments}, "events": {"timeline": [], "curves_path": str(curves)},
+               "candidates": {"candidates": cands}},
+        settings=config.Settings(), job_dir=tmp_path, emit=lambda f, m: messages.append(m), messages=messages)
+    out = ScoreStage().run(ctx)
+    assert len(brain.seen) == 6, "two frames for each of the three rated moments"
+    assert [t for t in pulled if len(t) == 2][:3] == [[14.7, 35.7], [114.7, 135.7], [214.7, 235.7]]
+    assert any("with frames" in m for m in messages)
+    assert out["clips"][0]["brain_rank"] == 1

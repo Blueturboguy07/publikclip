@@ -15,6 +15,8 @@ import os
 from typing import Any, Callable
 
 RANK_POOL = 16          # how many the brain is asked to pick, best first
+FRAMES_PER_CANDIDATE = 2  # one frame near the setup, one near the payoff (Gemini-class brains)
+FRAME_POINTS = (0.35, 0.85)
 RANK_BONUS = 0.5        # the first pick's composite factor is 1 + RANK_BONUS; the last pick's ~1.0
 
 RANK_SCHEMA: dict[str, Any] = {
@@ -76,8 +78,17 @@ def describe(entry: dict, index: int) -> str:
     )
 
 
-def rank_prompt(entries: list[tuple[int, dict]], want: int) -> str:
+def rank_prompt(entries: list[tuple[int, dict]], want: int, frames_per: int = 0) -> str:
     blocks = [describe(entry, index) for index, entry in entries]
+    frames = ""
+    if frames_per:
+        frames = (
+            f"\n\nAfter this text come {frames_per} frames per candidate, in the candidates' "
+            "order above (all of the first candidate's frames, then the next candidate's, and "
+            "so on), taken near each candidate's setup and payoff. Use them: a face in pain, a "
+            "fall, a lift, a stunt, a crowd, a reaction or real motion counts as much as the words, "
+            "and a talking head counts less than one."
+        )
     return (
         "You have rated these candidate moments from one long video one at a time. Now "
         "look at all of them together and pick the ones that would do best as "
@@ -88,6 +99,7 @@ def rank_prompt(entries: list[tuple[int, dict]], want: int) -> str:
         "introduction, a recap, logistics, or a moment that only sets up a later one is "
         "not a pick. Prefer moments about different things.\n\n"
         + "\n\n".join(blocks)
+        + frames
         + "\n\nReturn the picks best first, each with its candidate number copied exactly."
     )
 
@@ -121,16 +133,33 @@ def reasons(answer: Any) -> dict[int, str]:
     return out
 
 
-def rank(client, entries: list[tuple[int, dict]], want: int, emit: Callable[[float, str], None]) -> tuple[dict[int, int], dict[int, str]]:
-    """{index: 1-based rank} and {index: why} for the picks. Raises what the
-    client raises; an unusable answer ranks nothing (every candidate keeps
-    its rubric score)."""
+def frame_times(entry: dict) -> list[float]:
+    length = float(entry["end"]) - float(entry["start"])
+    return [round(float(entry["start"]) + length * p, 2) for p in FRAME_POINTS]
+
+
+def rank(
+    client,
+    entries: list[tuple[int, dict]],
+    want: int,
+    emit: Callable[[float, str], None],
+    images: list[bytes] | None = None,
+) -> tuple[dict[int, int], dict[int, str]]:
+    """{index: 1-based rank} and {index: why} for the picks. `images` are
+    FRAMES_PER_CANDIDATE frames per entry in entry order, or nothing. Raises
+    what the client raises; an unusable answer ranks nothing (every candidate
+    keeps its rubric score)."""
     if os.environ.get("PUBLIKCLIP_NO_RANK") or len(entries) <= 1:
         return {}, {}
     if getattr(client, "backend", "") != "gemini":
         return {}, {}  # a small local model cannot hold ~50 moments in one view
-    emit(-1, f"Ranking {len(entries)} moments against each other…")
-    answer = client.generate_json(rank_prompt(entries, want), RANK_SCHEMA)
+    frames_per = 0
+    if images and len(images) == FRAMES_PER_CANDIDATE * len(entries):
+        frames_per = FRAMES_PER_CANDIDATE
+    else:
+        images = None
+    emit(-1, f"Ranking {len(entries)} moments against each other" + (" with frames…" if frames_per else "…"))
+    answer = client.generate_json(rank_prompt(entries, want, frames_per), RANK_SCHEMA, images=images)
     order = parse(answer, {index for index, _ in entries})
     emit(-1, f"The brain picked {len(order)} moments")
     return {index: n + 1 for n, index in enumerate(order)}, reasons(answer)
