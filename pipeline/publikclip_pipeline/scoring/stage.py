@@ -231,6 +231,13 @@ class ScoreStage(Stage):
             return max(scores.values())
 
         scored.sort(key=_text_rank, reverse=True)
+        # Every rated candidate with its pre-visual rank score, finalists or
+        # not: the backtest harness measures the whole ranking against replay
+        # data, and the review UI can one day show "also considered".
+        shortlist = [
+            {"start": e["start"], "end": e["end"], "text_score": round(_text_rank(e), 1)}
+            for e in scored
+        ]
         finalists = scored[:SELECT_COUNT]
 
         # T2 visual pass + music brief on finalists only.
@@ -304,6 +311,7 @@ class ScoreStage(Stage):
             "model": client.model,
             "clips": finalists,
             "scored_count": len(scored),
+            "shortlist": shortlist,
             "t2_ran": supports_vision,
             "scoring_config_version": scoring_config["version"],
             "scoring_constants": cv_constants,
