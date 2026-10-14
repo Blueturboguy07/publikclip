@@ -154,8 +154,15 @@ def test_a_silent_span_with_the_room_screaming_is_not_dead_air(monkeypatch, tmp_
     assert a["end"] == 42.0, "nothing trimmed: the screaming counts as action"
     assert a["speech_coverage"] < 0.4 and a["activity_coverage"] >= 0.9
     assert "dead_air" not in _rules(a)
-    # and a flat curve marks nothing active
-    assert not stage_mod._per_sec_pct(np.full(100, 0.3), 0.5, 50).any()
+    # a flat curve reads as all-top, which the saturation guard then ignores
+    flat = stage_mod._per_sec_pct(np.full(100, 0.3), 0.5, 50)
+    assert flat.min() == 1.0
+    assert not stage_mod._activity([], [], flat, np.zeros(50), 50).any()
+    # a plateau at the top covering a third of the video is the top
+    bumpy = np.r_[np.zeros(40), np.full(20, 0.9)]
+    pct = stage_mod._per_sec_pct(bumpy, 1.0, 60)
+    assert (pct[40:] >= 0.75).all() and (pct[:40] < 0.75).all()
+    assert stage_mod._activity([], [], pct, np.zeros(60), 60)[40:].all()
 
 
 def test_a_trimmed_start_snaps_to_the_sentence_that_begins_there(monkeypatch, tmp_path):

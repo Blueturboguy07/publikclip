@@ -122,8 +122,10 @@ def _speech_coverage(words: list[dict], start: float, end: float) -> float:
 
 
 def _per_sec_pct(values: np.ndarray, grid_sec: float, n: int) -> np.ndarray:
-    """A gridded curve as per-second percentile ranks within the video
-    (share of seconds strictly below; a flat curve is 0 everywhere)."""
+    """A gridded curve as per-second percentile ranks within the video:
+    the share of seconds at or below each second's value, so a plateau at
+    the top reads as the top. A flat curve reads 1.0 everywhere; callers
+    that gate on a top share must check how much of the video is up there."""
     out = np.zeros(n)
     if len(values) == 0:
         return out
@@ -131,7 +133,7 @@ def _per_sec_pct(values: np.ndarray, grid_sec: float, n: int) -> np.ndarray:
     coarse = values[: (len(values) // per) * per].reshape(-1, per).mean(axis=1) if per > 1 else values
     m = min(n, len(coarse))
     out[:m] = coarse[:m]
-    return np.searchsorted(np.sort(out), out, side="left") / max(1, n)
+    return np.searchsorted(np.sort(out), out, side="right") / max(1, n)
 
 
 def _activity(
@@ -151,10 +153,16 @@ def _activity(
         a = max(0, int(e["start"]))
         b = min(n, max(a + 1, int(np.ceil(e["end"]))))
         active[a:b] = True
-    m = min(n, len(arousal_pct))
-    active[:m] |= arousal_pct[:m] >= ACTIVE_AROUSAL_PCT
-    m = min(n, len(dynamics_pct))
-    active[:m] |= dynamics_pct[:m] >= ACTIVE_DYNAMICS_PCT
+    # A channel that puts more than half the video in its top band says
+    # nothing (the DSP arousal proxy saturates on a loud gym for 50 % of the
+    # seconds): then it marks nothing active.
+    for pct, floor in ((arousal_pct, ACTIVE_AROUSAL_PCT), (dynamics_pct, ACTIVE_DYNAMICS_PCT)):
+        m = min(n, len(pct))
+        if m == 0:
+            continue
+        top = pct[:m] >= floor
+        if top.mean() <= 0.5:
+            active[:m] |= top
     return active
 
 
