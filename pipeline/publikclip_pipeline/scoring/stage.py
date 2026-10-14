@@ -19,6 +19,7 @@ from ..music import brief as music_brief
 from . import constants as constants_mod
 from . import frames as frames_mod
 from . import llm as llm_mod
+from . import propose as propose_mod
 from . import rubric
 
 SELECT_COUNT = 12
@@ -258,7 +259,18 @@ class ScoreStage(Stage):
         scoring_config = constants_mod.active()
         cv_constants = scoring_config["constants"]
 
-        candidates = cands["candidates"]
+        # T0.5: the brain reads the whole transcript and names its own
+        # moments; they join the curve's windows, and one rubric rates all.
+        curve_path = ctx.job_dir / "interest_curve.json"
+        curve_per_sec = json.loads(curve_path.read_text()).get("per_sec", []) if curve_path.exists() else []
+        try:
+            proposed = propose_mod.propose(client, segments, ctx.emit)
+        except llm_mod.LlmError as err:
+            raise StageError(str(err)) from err
+        except Exception as err:  # noqa: BLE001 — the curve's windows still get judged
+            ctx.emit(-1, f"Reading the whole transcript failed, judging the curve's windows only: {err}")
+            proposed = []
+        candidates = propose_mod.merge(cands["candidates"], proposed, curve_per_sec)
         # Moments with too few words never cost a call.
         items: list[dict] = []
         for i, cand in enumerate(candidates):
@@ -334,6 +346,7 @@ class ScoreStage(Stage):
                     "heatmap_pct": round(heatmap_pct, 3) if heatmap_pct is not None else None,
                     "speech_coverage": round(coverage, 3),
                     "laugh_detector_alive": laugh_detector_alive,
+                    "source": cand.get("source", "curve"),
                     "summary": t1.get("summary", ""),
                     "transcript": labeled,
                 }
@@ -437,6 +450,9 @@ class ScoreStage(Stage):
             "clips": finalists,
             "scored_count": len(scored),
             "shortlist": shortlist,
+            "proposed": [
+                {k: p[k] for k in ("start", "end", "title", "payoff")} for p in proposed
+            ],
             "t2_ran": supports_vision,
             "scoring_config_version": scoring_config["version"],
             "scoring_constants": cv_constants,

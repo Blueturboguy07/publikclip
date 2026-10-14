@@ -67,7 +67,8 @@ T2_SCHEMA: dict[str, Any] = {
 # video were the bulk of JUDGE's spend, and a free Gemini key gets 20 a day
 # on the flash alias (Oct 11 2026 report). The same rubric, one array answer,
 # each entry tagged with the moment's index so nothing is matched by order.
-T1_BATCH_SIZE = 5
+# Eight since the brain's own proposals joined the pool (~50 candidates).
+T1_BATCH_SIZE = 8
 
 T1_BATCH_SCHEMA: dict[str, Any] = {
     "type": "object",
