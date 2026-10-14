@@ -30,7 +30,8 @@ const RULE_LABELS: Record<string, string> = {
   heatmap_boost: 'HUMANS REPLAYED THIS',
   dead_air: 'DEAD AIR',
   needs_context: 'NEEDS CONTEXT',
-  ends_after_punchline: 'ENDS ON THE PUNCHLINE'
+  ends_after_punchline: 'ENDS ON THE PUNCHLINE',
+  brain_rank: "THE BRAIN'S PICK"
 }
 
 const SIGNAL_LABELS: Record<string, string> = {
