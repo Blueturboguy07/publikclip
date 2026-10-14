@@ -19,9 +19,12 @@
 # shipping that is worse than shipping nothing.
 name: release
 
+# Dispatch only (Oct 14 2026). Releases are cut and signed on Mann's Mac from
+# the macos.yml / windows.yml artifacts; this repo has none of the APPLE_*
+# secrets above, so every tag push failed at "Refuse to ship unsigned" and
+# mailed a failure for a release that had already shipped. Add the secrets,
+# then restore `push: tags: ["v*"]` here to let CI cut releases again.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:

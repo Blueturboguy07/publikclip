@@ -67,7 +67,8 @@ T2_SCHEMA: dict[str, Any] = {
 # video were the bulk of JUDGE's spend, and a free Gemini key gets 20 a day
 # on the flash alias (Oct 11 2026 report). The same rubric, one array answer,
 # each entry tagged with the moment's index so nothing is matched by order.
-T1_BATCH_SIZE = 5
+# Eight since the brain's own proposals joined the pool (~50 candidates).
+T1_BATCH_SIZE = 8
 
 T1_BATCH_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -164,6 +165,15 @@ SHOCK_NO_AROUSAL = 0.6      # LLM says shocking, flat arousal + no heatmap lift
 HEATMAP_BOOST = 1.15        # real humans replayed this span (≥ p80)
 BAIT_PENALTY = 0.85         # per detected bait phrase, floor 0.6 (not fitted)
 
+# --- Selection rules (Oct 14 2026, design values, not fitted) ---------------
+# Oct 13 2026 report: "one of these clips is literally just dead space". The
+# finals of three local jobs were fixed windows cut around loudness peaks;
+# half of one was silence, twelve clips were nine moments, and the LLM's own
+# self_contained=false reached nothing. These three make the score say so.
+DEAD_AIR_FULL = 0.75     # speech covers this share of the clip or more: no penalty
+DEAD_AIR_FLOOR = 0.4     # the most dead air can cost
+NEEDS_CONTEXT = 0.85     # the LLM says the moment needs context from outside the clip
+
 
 def _c(constants: dict | None, key: str, default: float) -> float:
     return float(constants[key]) if constants and key in constants else default
@@ -176,8 +186,14 @@ def cross_validate(
     arousal_pct: float,
     heatmap_pct: float | None,
     constants: dict | None = None,
+    laugh_detector_alive: bool = True,
 ) -> tuple[dict, list[dict]]:
-    """Returns (adjusted_subscores, adjustments). Every change is recorded."""
+    """Returns (adjusted_subscores, adjustments). Every change is recorded.
+
+    `laugh_detector_alive` is false when the detector heard (almost) no
+    laughter anywhere in the source — a solo stream, game audio over the
+    voices. Then "funny but nobody laughed" says nothing about the joke, and
+    the discount is not applied."""
     # Clamp to the rubric range — schema enforcement doesn't bound integers,
     # and a small local model once returned value: -1.
     sub = {
@@ -191,14 +207,15 @@ def cross_validate(
 
     if sub["funniness"] >= 4:
         if not laughs_near:
-            sub["funniness"] *= funny_no_laugh
-            adjustments.append(
-                {
-                    "rule": "funny_no_laugh",
-                    "factor": funny_no_laugh,
-                    "reason": "LLM rated this funny but no laughter was detected within ±3s",
-                }
-            )
+            if laugh_detector_alive:
+                sub["funniness"] *= funny_no_laugh
+                adjustments.append(
+                    {
+                        "rule": "funny_no_laugh",
+                        "factor": funny_no_laugh,
+                        "reason": "LLM rated this funny but no laughter was detected within ±3s",
+                    }
+                )
         elif any(len(l.get("sources", [])) >= 2 for l in laughs_near):
             sub["funniness"] = min(10.0, sub["funniness"] * funny_corroborated)
             adjustments.append(
@@ -253,8 +270,19 @@ def composite(
     heatmap_pct: float | None,
     visual: dict | None,
     constants: dict | None = None,
+    *,
+    speech_coverage: float | None = None,
+    self_contained: bool | None = None,
+    brain_rank: int | None = None,
+    brain_why: str = "",
 ) -> tuple[dict[str, float], list[dict]]:
-    """Per-platform 0–100 scores + any composite-level adjustments."""
+    """Per-platform 0–100 scores + any composite-level adjustments.
+
+    `speech_coverage` is the share of the clip's seconds with speech or action;
+    `self_contained` is the LLM's own answer; `brain_rank` is the 1-based
+    position the brain gave this moment when it ranked the whole pool
+    (None: not picked). All None for clips scored before these rules
+    existed, so their stored scores replay unchanged."""
     adjustments: list[dict] = []
     platform_scores: dict[str, float] = {}
     heatmap_boost = _c(constants, "heatmap_boost", HEATMAP_BOOST)
@@ -276,6 +304,42 @@ def composite(
                 "rule": "heatmap_boost",
                 "factor": heatmap_boost,
                 "reason": "real viewers replayed this span (top 20% of the replay heatmap)",
+            }
+        )
+
+    if speech_coverage is not None and speech_coverage < DEAD_AIR_FULL:
+        factor = max(DEAD_AIR_FLOOR, round(speech_coverage / DEAD_AIR_FULL, 3))
+        for platform in platform_scores:
+            platform_scores[platform] *= factor
+        adjustments.append(
+            {
+                "rule": "dead_air",
+                "factor": factor,
+                "reason": f"speech or action covers only {speech_coverage:.0%} of the clip",
+            }
+        )
+    if self_contained is False:
+        for platform in platform_scores:
+            platform_scores[platform] *= NEEDS_CONTEXT
+        adjustments.append(
+            {
+                "rule": "needs_context",
+                "factor": NEEDS_CONTEXT,
+                "reason": "the moment needs context from outside the clip",
+            }
+        )
+    if brain_rank is not None:
+        from . import rank as rank_mod
+
+        factor = round(rank_mod.bonus(brain_rank), 3)
+        for platform in platform_scores:
+            platform_scores[platform] = min(1.0, platform_scores[platform] * factor)
+        adjustments.append(
+            {
+                "rule": "brain_rank",
+                "factor": factor,
+                "reason": f"pick #{int(brain_rank)} when the brain ranked every moment side by side"
+                + (f": {brain_why}" if brain_why else ""),
             }
         )
     return {k: round(v * 100, 1) for k, v in platform_scores.items()}, adjustments
@@ -312,13 +376,20 @@ def recompute_platform_scores(entry: dict, constants: dict) -> dict[str, float] 
         arousal_pct=float(entry.get("arousal_pct", 0.0)),
         heatmap_pct=entry.get("heatmap_pct"),
         constants=constants,
+        laugh_detector_alive=bool(entry.get("laugh_detector_alive", True)),
     )
+    # The selection rules arrived with speech_coverage; a clip stored without
+    # it was scored before them and must replay without them.
+    new_rules = "speech_coverage" in entry
     scores, _ = composite(
         sub,
         float(entry.get("curve_score", 0.0)),
         entry.get("heatmap_pct"),
         entry.get("t2"),
         constants=constants,
+        speech_coverage=entry.get("activity_coverage", entry.get("speech_coverage")) if new_rules else None,
+        self_contained=t1.get("self_contained") if new_rules else None,
+        brain_rank=entry.get("brain_rank") if new_rules else None,
     )
     return scores
 
@@ -331,10 +402,16 @@ def signals_summary(
     heatmap_pct: float | None,
     t2_ran: bool,
     arousal_source: str,
+    laugh_detector_alive: bool = True,
 ) -> tuple[list[str], list[str]]:
     fired: list[str] = []
     missing: list[str] = []
-    (fired if laughs_near else missing).append("laughter")
+    if laughs_near:
+        fired.append("laughter")
+    elif laugh_detector_alive:
+        missing.append("laughter")
+    else:
+        missing.append("laughter (the detector heard none in this video)")
     (fired if any(e["type"] != "laugh" for e in events_in_window) else missing).append("audio_events")
     (fired if arousal_pct >= 0.6 else missing).append("arousal")
     if heatmap_pct is None:

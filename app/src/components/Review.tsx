@@ -27,7 +27,11 @@ const RULE_LABELS: Record<string, string> = {
   funny_corroborated: 'LAUGHTER CONFIRMED ×2',
   shock_no_arousal: 'SHOCK, FLAT DELIVERY',
   bait_penalty: 'ENGAGEMENT BAIT',
-  heatmap_boost: 'HUMANS REPLAYED THIS'
+  heatmap_boost: 'HUMANS REPLAYED THIS',
+  dead_air: 'DEAD AIR',
+  needs_context: 'NEEDS CONTEXT',
+  ends_after_punchline: 'ENDS ON THE PUNCHLINE',
+  brain_rank: "THE BRAIN'S PICK"
 }
 
 const SIGNAL_LABELS: Record<string, string> = {

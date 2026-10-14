@@ -9,9 +9,15 @@ horizontal video file and produces vertical 9:16 clips with:
   on speaker change, punch-ins fired by actual laughter and vocal energy
 - **Word-accurate captions** — multiple styles, karaoke highlighting, prosodic
   emphasis (loud words get loud styling), `[laughs]` tags from real laughter detection
+- **Moments, not windows** — the brain reads the whole transcript and proposes
+  where each moment starts and ends, then ranks every candidate side by side
+  (with two frames each, so a lift or a fall counts as much as a punchline).
+  Dead air is cut, a clip ends one breath after its payoff, and twelve clips
+  are twelve different moments.
 - **A virality score you can audit** — never a bare number: every clip ships with
-  its subscores, which detectors fired, and every adjustment applied. LLM humor
-  scores get discounted when no actual laughter corroborates them.
+  its subscores, which detectors fired, and every adjustment applied, including
+  why the brain picked it. LLM humor scores get discounted when no actual
+  laughter corroborates them (and only when the laughter detector heard any).
 - **Music & SFX** — a local, CC-licensed library (import your own or pull from
   Freesound/Jamendo), auto-suggested from a genre/mood/energy brief derived
   from what's being said and how it sounds, with manual placement always

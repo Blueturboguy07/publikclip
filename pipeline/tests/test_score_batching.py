@@ -100,20 +100,23 @@ def _t1_calls(client):
     return [c for c in client.calls if c["schema"] in (rubric.T1_SCHEMA, rubric.T1_BATCH_SCHEMA)]
 
 
-def test_gemini_rates_five_moments_per_call(monkeypatch, tmp_path):
+def test_gemini_rates_a_batch_of_moments_per_call(monkeypatch, tmp_path):
     data, client, ctx = _run(monkeypatch, tmp_path, FakeClient(), n=12)
     t1 = _t1_calls(client)
-    assert len(t1) == 3 and all(c["schema"] is rubric.T1_BATCH_SCHEMA for c in t1)
+    assert rubric.T1_BATCH_SIZE == 8
+    assert len(t1) == 2 and all(c["schema"] is rubric.T1_BATCH_SCHEMA for c in t1)
     assert data["scored_count"] == 12
     # every moment kept its own answer (the summary names its index)
     assert sorted(c["summary"] for c in data["clips"]) == sorted(f"moment {i}" for i in range(12))
-    assert any("Scoring moments 1–5 of 12" in m for m in ctx.messages)
+    assert any("Scoring moments 1–8 of 12" in m for m in ctx.messages)
 
 
 def test_a_moment_the_batch_skipped_is_rated_on_its_own(monkeypatch, tmp_path):
     data, client, _ = _run(monkeypatch, tmp_path, FakeClient(skip={3, 7}), n=12)
     t1 = _t1_calls(client)
-    assert [c["schema"] is rubric.T1_BATCH_SCHEMA for c in t1] == [True, False, True, False, True]
+    # 12 moments in batches of 8: the two skipped (3 and 7) sit in the first
+    # batch and are rated alone before the second batch runs
+    assert [c["schema"] is rubric.T1_BATCH_SCHEMA for c in t1] == [True, False, False, True]
     assert data["scored_count"] == 12
 
 
