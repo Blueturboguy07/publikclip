@@ -564,6 +564,18 @@ def test_gemini_standard_quota_text_is_not_a_billing_stop(monkeypatch):
     assert len(calls) == 2 and _model_of(calls[-1]) == "gemini-flash-latest"
 
 
+def test_gemini_402_is_a_billing_stop_with_one_call(monkeypatch):
+    """Oct 14 2026: a key whose Google billing ran dry answered 402 and the
+    client retried three times, then said only "Gemini call failed"."""
+    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
+    _sleeps(monkeypatch)
+    calls = _capture(monkeypatch, [_Res(402, {"error": {"message": "Payment Required"}})])
+    with pytest.raises(llm_mod.LlmError) as err:
+        llm_mod.make_client("gemini").generate_json("p", SCHEMA)
+    assert "402" in str(err.value) and "billing" in str(err.value) and "resume" in str(err.value)
+    assert len(calls) == 1
+
+
 def test_gemini_paces_the_model_after_a_per_minute_hit(monkeypatch):
     monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "AIzaTEST")
     slept = _sleeps(monkeypatch)

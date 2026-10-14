@@ -607,6 +607,14 @@ class GeminiClient:
             status = res.status_code
             if status in (401, 403):
                 raise LlmError("Gemini rejected the API key. Check it in Settings.")
+            if status == 402:
+                # Google's billing behind the key, not the key and not a quota:
+                # retrying and switching models cannot help (Oct 14 2026).
+                raise LlmError(
+                    "Google answered 402 Payment Required for your Gemini key: the Google "
+                    "Cloud billing behind it is out of credit or its card failed. Fix billing "
+                    "at aistudio.google.com, or switch to publik API in Settings, then resume."
+                )
             if status == 404:
                 # Retired for this key ("no longer available to new users");
                 # it will say so again, so straight to the next model.
