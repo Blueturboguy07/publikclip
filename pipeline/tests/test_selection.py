@@ -154,10 +154,13 @@ def test_a_silent_span_with_the_room_screaming_is_not_dead_air(monkeypatch, tmp_
     assert a["end"] == 42.0, "nothing trimmed: the screaming counts as action"
     assert a["speech_coverage"] < 0.4 and a["activity_coverage"] >= 0.9
     assert "dead_air" not in _rules(a)
-    # a flat curve reads as all-top, which the saturation guard then ignores
+    # a flat curve sits at the midrank, never in the top band
     flat = stage_mod._per_sec_pct(np.full(100, 0.3), 0.5, 50)
-    assert flat.min() == 1.0
+    assert flat.min() == flat.max() == 0.5
     assert not stage_mod._activity([], [], flat, np.zeros(50), 50).any()
+    # a plateau at the top covering half the video is just inside the band
+    half = stage_mod._per_sec_pct(np.r_[np.zeros(30), np.ones(30)], 1.0, 60)
+    assert half[30:].min() == 0.75 and half[:30].max() == 0.25
     # a plateau at the top covering a third of the video is the top
     bumpy = np.r_[np.zeros(40), np.full(20, 0.9)]
     pct = stage_mod._per_sec_pct(bumpy, 1.0, 60)

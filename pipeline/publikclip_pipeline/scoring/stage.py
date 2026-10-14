@@ -122,10 +122,10 @@ def _speech_coverage(words: list[dict], start: float, end: float) -> float:
 
 
 def _per_sec_pct(values: np.ndarray, grid_sec: float, n: int) -> np.ndarray:
-    """A gridded curve as per-second percentile ranks within the video:
-    the share of seconds at or below each second's value, so a plateau at
-    the top reads as the top. A flat curve reads 1.0 everywhere; callers
-    that gate on a top share must check how much of the video is up there."""
+    """A gridded curve as per-second percentile ranks within the video,
+    ties at the midrank: a plateau at the top covering half the video reads
+    0.75, a flat curve reads 0.5 everywhere, a 10 % spike above a low floor
+    reads 0.95."""
     out = np.zeros(n)
     if len(values) == 0:
         return out
@@ -133,7 +133,10 @@ def _per_sec_pct(values: np.ndarray, grid_sec: float, n: int) -> np.ndarray:
     coarse = values[: (len(values) // per) * per].reshape(-1, per).mean(axis=1) if per > 1 else values
     m = min(n, len(coarse))
     out[:m] = coarse[:m]
-    return np.searchsorted(np.sort(out), out, side="right") / max(1, n)
+    ordered = np.sort(out)
+    below = np.searchsorted(ordered, out, side="left")
+    at_or_below = np.searchsorted(ordered, out, side="right")
+    return (below + at_or_below) / (2.0 * max(1, n))
 
 
 def _activity(
