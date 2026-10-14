@@ -60,9 +60,9 @@ def describe(entry: dict, index: int) -> str:
     events = entry.get("events_in_window") or []
     if events:
         signals.append("audio: " + ", ".join(sorted(set(events))))
-    cov = entry.get("speech_coverage")
+    cov = entry.get("activity_coverage", entry.get("speech_coverage"))
     if cov is not None:
-        signals.append(f"speech {float(cov):.0%} of the time")
+        signals.append(f"speech or action {float(cov):.0%} of the time")
     source = "proposed by you from the transcript" if entry.get("source") == "llm" else "a loudness peak"
     if entry.get("title"):
         source += f' ("{entry["title"]}")'

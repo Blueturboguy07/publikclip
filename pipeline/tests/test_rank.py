@@ -42,7 +42,7 @@ def test_the_ranker_sees_time_rubric_audio_and_both_ends_of_the_words():
     assert "proposed by you from the transcript (\"the lift\")" in text
     assert "vocal arousal in the top 3% of the video" in text
     assert "audio: cheer, laugh" in text
-    assert "speech 50% of the time" in text
+    assert "speech or action 50% of the time" in text
     assert "w0 w1" in text and " … " in text and "w99" in text
 
 

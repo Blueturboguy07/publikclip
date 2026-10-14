@@ -138,6 +138,35 @@ def test_dead_air_in_the_middle_lowers_the_score(monkeypatch, tmp_path):
     assert second["score"] < first["score"]
 
 
+def test_a_silent_span_with_the_room_screaming_is_not_dead_air(monkeypatch, tmp_path):
+    # A talks 0–12 only; from 12 to 42 nobody speaks but vocal arousal is in
+    # the video's top quarter (a sprint, a lift, a crowd). B talks all the way.
+    import numpy as np
+    from publikclip_pipeline.scoring import stage as stage_mod
+    segments = _segments([(0, 12), (100, 142)])
+    ctx = _ctx(tmp_path, segments, [_cand(0, 42), _cand(100, 142)])
+    arousal = [0.1] * 600
+    for i in range(24, 84):  # 12 s … 42 s on a 0.5 s grid
+        arousal[i] = 0.9
+    (tmp_path / "curves.json").write_text(json.dumps({"arousal": arousal, "arousal_grid_sec": 0.5}))
+    out = _run(monkeypatch, ctx, FakeClient())
+    a = next(c for c in out["clips"] if c["start"] == 0.0)
+    assert a["end"] == 42.0, "nothing trimmed: the screaming counts as action"
+    assert a["speech_coverage"] < 0.4 and a["activity_coverage"] >= 0.9
+    assert "dead_air" not in _rules(a)
+    # and a flat curve marks nothing active
+    assert not stage_mod._per_sec_pct(np.full(100, 0.3), 0.5, 50).any()
+
+
+def test_a_trimmed_start_snaps_to_the_sentence_that_begins_there(monkeypatch, tmp_path):
+    # 0–8 s: nothing; the first sentence starts at 8.0.
+    segments = _segments([(8, 20), (20, 42), (100, 142)])
+    ctx = _ctx(tmp_path, segments, [_cand(0, 42), _cand(100, 142)])
+    out = _run(monkeypatch, ctx, FakeClient())
+    a = min(out["clips"], key=lambda c: c["start"])
+    assert a["start"] == 8.0
+
+
 # --- ends on the payoff -----------------------------------------------------
 
 def test_the_clip_ends_after_the_punchline(monkeypatch, tmp_path):

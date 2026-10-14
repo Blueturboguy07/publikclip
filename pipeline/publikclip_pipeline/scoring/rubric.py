@@ -278,7 +278,7 @@ def composite(
 ) -> tuple[dict[str, float], list[dict]]:
     """Per-platform 0–100 scores + any composite-level adjustments.
 
-    `speech_coverage` is the share of the clip's seconds with speech;
+    `speech_coverage` is the share of the clip's seconds with speech or action;
     `self_contained` is the LLM's own answer; `brain_rank` is the 1-based
     position the brain gave this moment when it ranked the whole pool
     (None: not picked). All None for clips scored before these rules
@@ -315,7 +315,7 @@ def composite(
             {
                 "rule": "dead_air",
                 "factor": factor,
-                "reason": f"speech covers only {speech_coverage:.0%} of the clip",
+                "reason": f"speech or action covers only {speech_coverage:.0%} of the clip",
             }
         )
     if self_contained is False:
@@ -387,7 +387,7 @@ def recompute_platform_scores(entry: dict, constants: dict) -> dict[str, float] 
         entry.get("heatmap_pct"),
         entry.get("t2"),
         constants=constants,
-        speech_coverage=entry.get("speech_coverage") if new_rules else None,
+        speech_coverage=entry.get("activity_coverage", entry.get("speech_coverage")) if new_rules else None,
         self_contained=t1.get("self_contained") if new_rules else None,
         brain_rank=entry.get("brain_rank") if new_rules else None,
     )

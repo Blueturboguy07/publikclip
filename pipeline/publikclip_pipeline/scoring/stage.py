@@ -29,7 +29,13 @@ SELECT_COUNT = 12
 # loudness peak; these make sure what ships is a moment: speech, not air;
 # ends on the payoff; twelve different ones.
 MIN_CLIP_SEC = 15.0          # same floor as candidates/windows.MIN_LEN
-EDGE_SILENCE_MAX = 3.0       # leading/trailing silence a clip may keep
+EDGE_SILENCE_MAX = 3.0       # leading/trailing dead air a clip may keep
+# Dead air is "nothing happening", not "nobody talking": a second counts as
+# active with speech, an audio event, vocal arousal in the video's top
+# quarter, or a loudness swing in its top fifth. A gym sprint with 38 %
+# speech and screaming the whole way is a moment; silence over nothing is not.
+ACTIVE_AROUSAL_PCT = 0.75
+ACTIVE_DYNAMICS_PCT = 0.8
 TAIL_AFTER_PUNCHLINE = 1.0   # breath kept after the sentence that lands the punchline
 MIN_PUNCHLINE_CUT = 4.0      # a tail shorter than this is not worth a cut
 LAUGHS_PER_HOUR_ALIVE = 6.0  # fewer heard in the whole source: the detector, not the room, is silent
@@ -115,15 +121,66 @@ def _speech_coverage(words: list[dict], start: float, end: float) -> float:
     return float(covered.mean())
 
 
-def _trim_edges(start: float, end: float, words: list[dict]) -> tuple[float, float] | None:
-    """Cut leading/trailing silence longer than EDGE_SILENCE_MAX. None when
-    what is left is shorter than a clip."""
-    if not words:
+def _per_sec_pct(values: np.ndarray, grid_sec: float, n: int) -> np.ndarray:
+    """A gridded curve as per-second percentile ranks within the video
+    (share of seconds strictly below; a flat curve is 0 everywhere)."""
+    out = np.zeros(n)
+    if len(values) == 0:
+        return out
+    per = max(1, int(round(1.0 / grid_sec)))
+    coarse = values[: (len(values) // per) * per].reshape(-1, per).mean(axis=1) if per > 1 else values
+    m = min(n, len(coarse))
+    out[:m] = coarse[:m]
+    return np.searchsorted(np.sort(out), out, side="left") / max(1, n)
+
+
+def _activity(
+    segments: list[dict], timeline: list[dict], arousal_pct: np.ndarray, dynamics_pct: np.ndarray, n: int
+) -> np.ndarray:
+    """Per second: is anything happening? Speech, an audio event, high vocal
+    arousal, or a big loudness swing."""
+    active = np.zeros(n, dtype=bool)
+    for seg in segments:
+        for w in seg.get("words", []):
+            a = max(0, int(w["start"]))
+            b = min(n, max(a + 1, int(np.ceil(w.get("end", w["start"] + 0.3)))))
+            active[a:b] = True
+    for e in timeline:
+        if e.get("type") == "pause":
+            continue
+        a = max(0, int(e["start"]))
+        b = min(n, max(a + 1, int(np.ceil(e["end"]))))
+        active[a:b] = True
+    m = min(n, len(arousal_pct))
+    active[:m] |= arousal_pct[:m] >= ACTIVE_AROUSAL_PCT
+    m = min(n, len(dynamics_pct))
+    active[:m] |= dynamics_pct[:m] >= ACTIVE_DYNAMICS_PCT
+    return active
+
+
+def _activity_coverage(active: np.ndarray, start: float, end: float) -> float:
+    a, b = int(start), max(int(start) + 1, int(np.ceil(end)))
+    part = active[a:min(b, len(active))]
+    return float(part.mean()) if len(part) else 0.0
+
+
+def _trim_edges(
+    start: float, end: float, active: np.ndarray, seg_starts: np.ndarray
+) -> tuple[float, float] | None:
+    """Cut leading/trailing dead air longer than EDGE_SILENCE_MAX. A new
+    start snaps to a sentence start nearby. None when what is left is
+    shorter than a clip or nothing happens in it."""
+    a, b = int(start), max(int(start) + 1, int(np.ceil(end)))
+    part = active[a:min(b, len(active))]
+    if not part.any():
         return None
-    first = float(words[0]["start"])
-    last = float(words[-1].get("end", words[-1]["start"] + 0.3))
+    on = np.flatnonzero(part)
+    first = a + float(on[0])
+    last = a + float(on[-1]) + 1.0
     if first - start > EDGE_SILENCE_MAX:
-        start = max(start, first - 0.5)
+        new_start = max(start, first - 0.5)
+        near = seg_starts[(seg_starts >= new_start - 1.0) & (seg_starts <= new_start + 2.0)]
+        start = float(near[0]) if len(near) else new_start
     if end - last > EDGE_SILENCE_MAX:
         end = min(end, last + 1.0)
     if end - start < MIN_CLIP_SEC:
@@ -229,6 +286,7 @@ class ScoreStage(Stage):
             raise StageError(str(err)) from err
 
         segments = diarize["segments"]
+        seg_starts = np.array([float(seg["start"]) for seg in segments], dtype=float)
         seg_ends = np.array([float(seg["end"]) for seg in segments], dtype=float)
         timeline = events["timeline"]
         duration_sec = float(ingest["probe"]["duration_sec"])
@@ -244,6 +302,14 @@ class ScoreStage(Stage):
         arousal = np.asarray(curves.get("arousal", []), dtype=float)
         arousal_grid = float(curves.get("arousal_grid_sec", 0.5))
         arousal_source = curves.get("arousal_source", "dsp-proxy")
+        n_sec = max(1, int(np.ceil(duration_sec)))
+        active = _activity(
+            segments,
+            timeline,
+            _per_sec_pct(arousal, arousal_grid, n_sec),
+            _per_sec_pct(np.asarray(curves.get("dynamics", []), dtype=float), float(curves.get("grid_sec", 0.5)), n_sec),
+            n_sec,
+        )
         heatmap = ingest.get("heatmap")
         scene_times = json.loads((ctx.job_dir / "scenes.json").read_text()) if (ctx.job_dir / "scenes.json").exists() else []
 
@@ -276,11 +342,11 @@ class ScoreStage(Stage):
         items: list[dict] = []
         for i, cand in enumerate(candidates):
             start, end = cand["start"], cand["end"]
-            words = _window_words(segments, start, end)
-            trimmed = _trim_edges(start, end, words)
+            trimmed = _trim_edges(start, end, active, seg_starts)
             if trimmed is None:
                 continue
             start, end = trimmed
+            words = _window_words(segments, start, end)
             labeled, flat = _transcript_slice(segments, start, end)
             if len(flat.split()) < 20:
                 continue
@@ -318,7 +384,8 @@ class ScoreStage(Stage):
                 )
                 end = new_end
                 labeled, _ = _transcript_slice(segments, start, end)
-            coverage = _speech_coverage(_window_words(segments, start, end), start, end)
+            speech = _speech_coverage(_window_words(segments, start, end), start, end)
+            coverage = _activity_coverage(active, start, end)
             near_laughs = [e for e in _events_in(timeline, start, end, pad=3.0) if e["type"] == "laugh"]
 
             arousal_pct = _window_pct(arousal, arousal_grid, start, end)
@@ -345,7 +412,8 @@ class ScoreStage(Stage):
                     "adjustments": adjustments,
                     "arousal_pct": round(arousal_pct, 3),
                     "heatmap_pct": round(heatmap_pct, 3) if heatmap_pct is not None else None,
-                    "speech_coverage": round(coverage, 3),
+                    "speech_coverage": round(speech, 3),
+                    "activity_coverage": round(coverage, 3),
                     "laugh_detector_alive": laugh_detector_alive,
                     "source": cand.get("source", "curve"),
                     "title": cand.get("title", ""),
@@ -366,7 +434,7 @@ class ScoreStage(Stage):
             scores, _ = rubric.composite(
                 entry["subscores"], entry["curve_score"], entry["heatmap_pct"], None,
                 constants=cv_constants,
-                speech_coverage=entry["speech_coverage"],
+                speech_coverage=entry["activity_coverage"],
                 self_contained=entry["t1_raw"].get("self_contained"),
                 brain_rank=entry.get("brain_rank"),
             )
@@ -427,7 +495,7 @@ class ScoreStage(Stage):
             platform_scores, comp_adjustments = rubric.composite(
                 entry["subscores"], entry["curve_score"], entry["heatmap_pct"], visual,
                 constants=cv_constants,
-                speech_coverage=entry["speech_coverage"],
+                speech_coverage=entry["activity_coverage"],
                 self_contained=entry["t1_raw"].get("self_contained"),
                 brain_rank=entry.get("brain_rank"),
                 brain_why=entry.get("brain_why", ""),
