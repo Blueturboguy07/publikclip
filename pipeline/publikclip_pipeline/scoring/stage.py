@@ -23,6 +23,16 @@ from . import rubric
 
 SELECT_COUNT = 12
 
+# Selection rules (Oct 14 2026). A candidate window is ~42 s cut around a
+# loudness peak; these make sure what ships is a moment: speech, not air;
+# ends on the payoff; twelve different ones.
+MIN_CLIP_SEC = 15.0          # same floor as candidates/windows.MIN_LEN
+EDGE_SILENCE_MAX = 3.0       # leading/trailing silence a clip may keep
+TAIL_AFTER_PUNCHLINE = 1.0   # breath kept after the sentence that lands the punchline
+MIN_PUNCHLINE_CUT = 4.0      # a tail shorter than this is not worth a cut
+LAUGHS_PER_HOUR_ALIVE = 6.0  # fewer heard in the whole source: the detector, not the room, is silent
+FINAL_OVERLAP_SEC = 10.0     # finalists sharing more than this are one moment
+
 
 def _chunks(items: list, size: int) -> list[list]:
     size = max(1, size)
@@ -79,6 +89,81 @@ def _score_t1(client, items: list[dict], batch_size: int, ctx: StageContext) -> 
                 ctx.emit(-1, f"moment {it['i'] + 1} scoring failed, skipping: {err}")
         done += len(chunk)
     return out
+
+
+def _window_words(segments: list[dict], start: float, end: float) -> list[dict]:
+    """The words inside a window, in time order — the same words, in the
+    same order, as the transcript the LLM rates (punchline_index counts them)."""
+    out: list[dict] = []
+    for seg in segments:
+        if seg["end"] < start or seg["start"] > end:
+            continue
+        out.extend(w for w in seg.get("words", []) if start <= w["start"] < end)
+    return out
+
+
+def _speech_coverage(words: list[dict], start: float, end: float) -> float:
+    """Share of the window's seconds that carry speech."""
+    n = max(1, int(np.ceil(end - start)))
+    covered = np.zeros(n, dtype=bool)
+    for w in words:
+        a = max(0, int(w["start"] - start))
+        b = min(n, max(a + 1, int(np.ceil(w.get("end", w["start"] + 0.3) - start))))
+        covered[a:b] = True
+    return float(covered.mean())
+
+
+def _trim_edges(start: float, end: float, words: list[dict]) -> tuple[float, float] | None:
+    """Cut leading/trailing silence longer than EDGE_SILENCE_MAX. None when
+    what is left is shorter than a clip."""
+    if not words:
+        return None
+    first = float(words[0]["start"])
+    last = float(words[-1].get("end", words[-1]["start"] + 0.3))
+    if first - start > EDGE_SILENCE_MAX:
+        start = max(start, first - 0.5)
+    if end - last > EDGE_SILENCE_MAX:
+        end = min(end, last + 1.0)
+    if end - start < MIN_CLIP_SEC:
+        return None
+    return round(start, 3), round(end, 3)
+
+
+def _end_after_punchline(
+    start: float, end: float, words: list[dict], punchline_index: object, seg_ends: np.ndarray
+) -> float | None:
+    """Where the clip should end when the LLM located the punchline: the end
+    of the sentence that lands it, plus a breath. None when there is no
+    usable punchline, nothing worth cutting, or the clip would get too short."""
+    try:
+        idx = int(punchline_index)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if idx < 0 or idx >= len(words):
+        return None
+    punch = float(words[idx]["start"])
+    later = seg_ends[seg_ends >= punch]
+    sentence_end = float(later[0]) if len(later) else punch + 1.5
+    new_end = min(end, sentence_end + TAIL_AFTER_PUNCHLINE)
+    if end - new_end < MIN_PUNCHLINE_CUT or new_end - start < MIN_CLIP_SEC:
+        return None
+    return round(new_end, 3)
+
+
+def _overlap_sec(a: dict, b: dict) -> float:
+    return max(0.0, min(a["end"], b["end"]) - max(a["start"], b["start"]))
+
+
+def _distinct(ranked: list[dict], limit: int) -> list[dict]:
+    """Best first, skipping a span that shares more than FINAL_OVERLAP_SEC
+    with one already taken: twelve clips are twelve moments."""
+    picked: list[dict] = []
+    for entry in ranked:
+        if all(_overlap_sec(entry, p) <= FINAL_OVERLAP_SEC for p in picked):
+            picked.append(entry)
+        if len(picked) >= limit:
+            break
+    return picked
 
 
 def _transcript_slice(segments: list[dict], start: float, end: float) -> tuple[str, str]:
@@ -142,7 +227,17 @@ class ScoreStage(Stage):
             raise StageError(str(err)) from err
 
         segments = diarize["segments"]
+        seg_ends = np.array([float(seg["end"]) for seg in segments], dtype=float)
         timeline = events["timeline"]
+        duration_sec = float(ingest["probe"]["duration_sec"])
+        laugh_count = sum(1 for e in timeline if e["type"] == "laugh")
+        laugh_detector_alive = laugh_count / max(1 / 60, duration_sec / 3600.0) >= LAUGHS_PER_HOUR_ALIVE
+        if not laugh_detector_alive:
+            ctx.emit(
+                -1,
+                f"The laughter detector heard {laugh_count} laugh{'s' if laugh_count != 1 else ''} "
+                "in this video, so humour is not discounted for missing laughter.",
+            )
         curves = json.loads(Path(events["curves_path"]).read_text())
         arousal = np.asarray(curves.get("arousal", []), dtype=float)
         arousal_grid = float(curves.get("arousal_grid_sec", 0.5))
@@ -168,6 +263,11 @@ class ScoreStage(Stage):
         items: list[dict] = []
         for i, cand in enumerate(candidates):
             start, end = cand["start"], cand["end"]
+            words = _window_words(segments, start, end)
+            trimmed = _trim_edges(start, end, words)
+            if trimmed is None:
+                continue
+            start, end = trimmed
             labeled, flat = _transcript_slice(segments, start, end)
             if len(flat.split()) < 20:
                 continue
@@ -176,6 +276,9 @@ class ScoreStage(Stage):
                 {
                     "i": i,
                     "cand": cand,
+                    "start": start,
+                    "end": end,
+                    "words": words,
                     "labeled": labeled,
                     "context": {"duration": end - start, "events_desc": _events_desc(window_events)},
                 }
@@ -189,20 +292,35 @@ class ScoreStage(Stage):
             t1 = t1_by_index.get(i)
             if t1 is None:
                 continue
-            start, end = cand["start"], cand["end"]
+            start, end = item["start"], item["end"]
+            adjustments: list[dict] = []
+            new_end = _end_after_punchline(start, end, item["words"], t1.get("punchline_index"), seg_ends)
+            if new_end is not None:
+                adjustments.append(
+                    {
+                        "rule": "ends_after_punchline",
+                        "factor": 1.0,
+                        "reason": f"cut {end - new_end:.0f} s that followed the punchline",
+                    }
+                )
+                end = new_end
+                labeled, _ = _transcript_slice(segments, start, end)
+            coverage = _speech_coverage(_window_words(segments, start, end), start, end)
             near_laughs = [e for e in _events_in(timeline, start, end, pad=3.0) if e["type"] == "laugh"]
 
             arousal_pct = _window_pct(arousal, arousal_grid, start, end)
             heatmap_pct = (
                 _window_pct(heat_values, 1.0, start, end) if heat_values is not None else None
             )
-            sub, adjustments = rubric.cross_validate(
+            sub, cv_adjustments = rubric.cross_validate(
                 t1,
                 laughs_near=near_laughs,
                 arousal_pct=arousal_pct,
                 heatmap_pct=heatmap_pct,
                 constants=cv_constants,
+                laugh_detector_alive=laugh_detector_alive,
             )
+            adjustments.extend(cv_adjustments)
             scored.append(
                 {
                     "start": start,
@@ -214,6 +332,8 @@ class ScoreStage(Stage):
                     "adjustments": adjustments,
                     "arousal_pct": round(arousal_pct, 3),
                     "heatmap_pct": round(heatmap_pct, 3) if heatmap_pct is not None else None,
+                    "speech_coverage": round(coverage, 3),
+                    "laugh_detector_alive": laugh_detector_alive,
                     "summary": t1.get("summary", ""),
                     "transcript": labeled,
                 }
@@ -227,6 +347,8 @@ class ScoreStage(Stage):
             scores, _ = rubric.composite(
                 entry["subscores"], entry["curve_score"], entry["heatmap_pct"], None,
                 constants=cv_constants,
+                speech_coverage=entry["speech_coverage"],
+                self_contained=entry["t1_raw"].get("self_contained"),
             )
             return max(scores.values())
 
@@ -238,7 +360,7 @@ class ScoreStage(Stage):
             {"start": e["start"], "end": e["end"], "text_score": round(_text_rank(e), 1)}
             for e in scored
         ]
-        finalists = scored[:SELECT_COUNT]
+        finalists = _distinct(scored, SELECT_COUNT)
 
         # T2 visual pass + music brief on finalists only.
         supports_vision = client.backend == "gemini"
@@ -269,6 +391,8 @@ class ScoreStage(Stage):
             platform_scores, comp_adjustments = rubric.composite(
                 entry["subscores"], entry["curve_score"], entry["heatmap_pct"], visual,
                 constants=cv_constants,
+                speech_coverage=entry["speech_coverage"],
+                self_contained=entry["t1_raw"].get("self_contained"),
             )
             entry["adjustments"].extend(comp_adjustments)
             entry["platform_scores"] = platform_scores
@@ -283,6 +407,7 @@ class ScoreStage(Stage):
                 heatmap_pct=entry["heatmap_pct"],
                 t2_ran=visual is not None,
                 arousal_source=arousal_source,
+                laugh_detector_alive=laugh_detector_alive,
             )
             entry["signals_fired"] = fired
             entry["signals_missing"] = missing
