@@ -147,12 +147,16 @@ def test_one_call_reads_a_whole_hour_on_gemini():
     assert "#359 [59:50] S0:" in brain.prompts[0]
 
 
-def test_a_small_local_model_reads_a_few_minutes_at_a_time():
+def test_a_local_model_is_not_asked_to_propose():
     segs = _segments([(i * 10, i * 10 + 10) for i in range(360)])
     brain = Brain(backend="ollama")
-    propose.propose(brain, segs, lambda f, m: None)
-    assert len(brain.prompts) == 6  # 7200 words / 1200
-    assert all("Choose the 3 best moments" in p for p in brain.prompts)
+    assert propose.propose(brain, segs, lambda f, m: None) == []
+    assert brain.prompts == []
+
+
+def test_chunking_splits_a_long_transcript_for_a_small_budget():
+    lines = propose.lines_from(_segments([(i * 10, i * 10 + 10) for i in range(360)]))
+    assert len(propose.chunk(lines, 1200)) == 6  # 7200 words / 1200
 
 
 def test_the_switch_turns_the_call_off(monkeypatch):

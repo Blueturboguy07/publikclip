@@ -24,9 +24,9 @@ from ..candidates.windows import DEDUPE_IOU, MAX_LEN, MIN_LEN
 
 PROPOSALS_PER_VIDEO = 20
 MIN_PER_CHUNK = 3
-# Words per call. A Gemini-class brain reads an hour in one call; a small
-# local model gets a few minutes at a time.
-CHUNK_WORDS = {"gemini": 12000, "publik": 12000, "ollama": 1200}
+# Words per call. A Gemini-class brain (own key or publik API, both report
+# backend "gemini") reads an hour in one call. Ollama is gated off below.
+CHUNK_WORDS = {"gemini": 12000, "ollama": 1200}
 IDEAL_MAX_SEC = 60.0
 
 
@@ -180,6 +180,11 @@ def propose(client, segments: list[dict], emit: Callable[[float, str], None]) ->
     client raises (quota stops must stop the stage); an unusable answer is an
     empty list, never a crash."""
     if os.environ.get("PUBLIKCLIP_NO_PROPOSE"):
+        return []
+    if getattr(client, "backend", "") != "gemini":
+        # A small local model (qwen2.5:7b, Oct 14 2026) answered with generic
+        # back-to-back segments ("Game in progress") and empty payoffs: six
+        # slow calls for nothing. The curve's windows are its pool.
         return []
     lines = lines_from(segments)
     if not lines:

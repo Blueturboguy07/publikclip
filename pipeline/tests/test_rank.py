@@ -90,6 +90,9 @@ def test_rank_returns_one_based_positions_and_reasons():
 def test_one_candidate_is_not_ranked_and_the_switch_turns_it_off(monkeypatch):
     brain = Brain()
     assert rank.rank(brain, [(0, _entry(0, 20))], 12, lambda f, m: None) == ({}, {})
+    brain.backend = "ollama"
+    assert rank.rank(brain, [(0, _entry(0, 20)), (1, _entry(30, 50))], 12, lambda f, m: None) == ({}, {})
+    brain.backend = "gemini"
     monkeypatch.setenv("PUBLIKCLIP_NO_RANK", "1")
     assert rank.rank(brain, [(0, _entry(0, 20)), (1, _entry(30, 50))], 12, lambda f, m: None) == ({}, {})
     assert brain.prompts == []

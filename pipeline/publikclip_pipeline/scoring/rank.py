@@ -127,6 +127,8 @@ def rank(client, entries: list[tuple[int, dict]], want: int, emit: Callable[[flo
     its rubric score)."""
     if os.environ.get("PUBLIKCLIP_NO_RANK") or len(entries) <= 1:
         return {}, {}
+    if getattr(client, "backend", "") != "gemini":
+        return {}, {}  # a small local model cannot hold ~50 moments in one view
     emit(-1, f"Ranking {len(entries)} moments against each other…")
     answer = client.generate_json(rank_prompt(entries, want), RANK_SCHEMA)
     order = parse(answer, {index for index, _ in entries})
