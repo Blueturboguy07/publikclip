@@ -9,6 +9,8 @@ Artifacts produced in the job dir:
 from __future__ import annotations
 
 import hashlib
+import os
+import shutil
 from pathlib import Path
 
 from ..jobs.queue import Stage, StageContext, StageError
@@ -23,6 +25,17 @@ def _sample_hash(path: Path) -> str:
     with open(path, "rb") as fh:
         h.update(fh.read(1024 * 1024))
     return h.hexdigest()[:16]
+
+
+def _same_file(src: Path, staged: Path) -> bool:
+    """True when `staged` is still the current content of `src` (hardlink or copy)."""
+    try:
+        if os.path.samefile(src, staged):
+            return True
+        a, b = src.stat(), staged.stat()
+        return a.st_size == b.st_size and int(a.st_mtime) == int(b.st_mtime)
+    except OSError:
+        return False
 
 
 class IngestStage(Stage):
@@ -72,6 +85,17 @@ class IngestStage(Stage):
             if not media_path.exists():
                 raise StageError(f"File not found: {media_path}")
             title = media_path.stem
+            # The editor loads media through Tauri's asset protocol, which only
+            # serves ~/.publikclip/**. Stage the local file inside the job dir.
+            staged = ctx.job_dir / ("source" + media_path.suffix.lower())
+            if staged.exists() and not _same_file(media_path, staged):
+                staged.unlink()  # the source changed since the last run
+            if not staged.exists():
+                try:
+                    os.link(media_path, staged)
+                except OSError:
+                    shutil.copy2(media_path, staged)
+            media_path = staged
 
         prog(0.96, "Probing media…")
         try:
