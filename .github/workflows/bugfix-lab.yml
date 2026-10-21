@@ -17,6 +17,10 @@ on:
         description: "Path under scripts/bugfix-lab/ of the .ps1 oracle body to run"
         required: true
         default: publikclip-windows-build-fails-then-launch-fails.ps1
+      canned_asr:
+        description: "1 = control run with a canned asr checkpoint (used by publikclip-20261019-890940)"
+        required: false
+        default: "0"
 
 jobs:
   windows-oracle:
@@ -27,6 +31,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Run oracle body
         shell: pwsh
+        env:
+          ORACLE_CANNED_ASR: ${{ inputs.canned_asr }}
         run: |
           $body = Join-Path "scripts/bugfix-lab" "${{ inputs.script }}"
           if (-not (Test-Path $body)) {
