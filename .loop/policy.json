@@ -1,0 +1,36 @@
+{
+  "max_files": 12,
+  "max_lines": 400,
+  "default_branch": "main",
+  "humans": [
+    "Blueturboguy07"
+  ],
+  "setup_cmds": [
+    "cd pipeline && uv sync --group dev --group pipeline",
+    "cd app && npm ci"
+  ],
+  "test_cmds": [
+    "cd pipeline && uv run pytest -q",
+    "cd app/src-tauri && cargo test"
+  ],
+  "test_os": [
+    "macos-latest"
+  ],
+  "node_version": "22",
+  "setup_uv": true,
+  "forbidden_paths": [
+    ".github/workflows/**",
+    "**/notarize*",
+    "**/release.sh",
+    "scripts/sign*",
+    ".loop/policy.json",
+    ".loop/policy/**"
+  ],
+  "acceptance": {
+    "timeout_min": 30,
+    "runs": 2
+  },
+  "release": {
+    "dispatch_workflow": null
+  }
+}
