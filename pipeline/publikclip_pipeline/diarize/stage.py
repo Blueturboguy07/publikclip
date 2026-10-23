@@ -3,12 +3,34 @@ turns → word-level speaker labels merged back into the transcript."""
 
 from __future__ import annotations
 
+import contextlib
+import sys
 from pathlib import Path
 
 import numpy as np
 
 from ..jobs.queue import Stage, StageContext, StageError
 from ..models import registry, specs
+
+
+@contextlib.contextmanager
+def _hide_lazy_modules():
+    """librosa's lazy_loader walks sys.modules via inspect.getmodule(), which
+    touches speechbrain's LazyModule placeholders (left by the asr stage);
+    k2_fsa then tries `import k2` and raises ImportError where k2 is absent
+    (Windows). Park the unresolved placeholders while librosa loads."""
+    parked = {
+        name: mod
+        for name, mod in list(sys.modules.items())
+        if type(mod).__module__.startswith("speechbrain")
+        or (name.startswith("speechbrain") and "Lazy" in type(mod).__name__)
+    }
+    for name in parked:
+        sys.modules.pop(name, None)
+    try:
+        yield
+    finally:
+        sys.modules.update(parked)
 
 
 class DiarizeStage(Stage):
@@ -59,9 +81,10 @@ class DiarizeStage(Stage):
                 "retry diarization."
             ) from err
 
-        import librosa
+        with _hide_lazy_modules():
+            import librosa
 
-        y16k, _ = librosa.load(str(audio_path), sr=16000, mono=True)
+            y16k, _ = librosa.load(str(audio_path), sr=16000, mono=True)
         duration = len(y16k) / 16000.0
 
         segments = asr["segments"]
@@ -81,10 +104,11 @@ class DiarizeStage(Stage):
                 ctx.emit(0.8, "Embeddings cached")
         if embeddings is None:
             ctx.emit(0.25, f"Embedding {len(windows)} speech windows…")
-            embeddings = campplus.embed_windows(
-                model, y16k, windows, device,
-                progress=lambda f: ctx.emit(0.25 + f * 0.55, "Embedding speech…"),
-            )
+            with _hide_lazy_modules():
+                embeddings = campplus.embed_windows(
+                    model, y16k, windows, device,
+                    progress=lambda f: ctx.emit(0.25 + f * 0.55, "Embedding speech…"),
+                )
             np.save(cache_path, embeddings)
 
         ctx.emit(0.85, "Clustering speakers…")
