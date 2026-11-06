@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 mod publik;
+mod publik_telemetry;
 mod update;
 
 pub(crate) fn home_dir() -> PathBuf {
@@ -688,6 +689,14 @@ fn main() {
         ])
         .setup(|app| {
             let _ = app.get_webview_window("main");
+            // Usage counts (publik telemetry v1): app_opened now, active_session
+            // every 30 minutes, from a background thread. The key is this
+            // computer's publik API key when there is one, never an own key.
+            publik_telemetry::start(
+                "publikclip",
+                env!("CARGO_PKG_VERSION"),
+                Some(Box::new(|| publik::read_secrets()["publik"]["key"].as_str().map(String::from))),
+            );
             Ok(())
         })
         .run(tauri::generate_context!())

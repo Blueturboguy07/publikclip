@@ -21,9 +21,10 @@ horizontal video file and produces vertical 9:16 clips with:
 
 Every model — speech recognition, forced alignment, diarization, laughter
 detection, audio tagging, face detection, active-speaker detection — runs
-locally. The only network calls are the video download and 2–3 small LLM calls
+locally. The only network calls are the video download, 2–3 small LLM calls
 (publik API by default — no key to paste; or bring your own Gemini key, or run
-fully local via Ollama at reduced scoring quality).
+fully local via Ollama at reduced scoring quality) and a small usage count
+(see [Usage counts](#usage-counts)).
 
 ## Status
 
@@ -68,6 +69,15 @@ Creative-Commons tracks from Freesound/Jamendo straight from the app.
   ("allow attribution" in the Online tab) and is never silent about it — a
   `credits.txt` is written next to every rendered clip that uses one,
   listing its attribution. NC and ND licences are never fetched, full stop.
+
+## Usage counts
+
+publikclip sends two usage events to publik: `app_opened` once per launch and
+`active_session` every 30 minutes while it runs. An event holds the app name
+and version, the operating system, the CPU type and a random install ID, plus
+this computer's publik key when it uses publik API. No video, transcript, file
+name or prompt is sent. Turn it off with `DO_NOT_TRACK=1` in the environment.
+Details: [publikhq.com/skills/telemetry.md](https://publikhq.com/skills/telemetry.md).
 
 ## Layout
 
