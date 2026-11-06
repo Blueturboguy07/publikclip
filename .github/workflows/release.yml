@@ -19,9 +19,12 @@
 # shipping that is worse than shipping nothing.
 name: release
 
+# Manual only. It used to run on every `v*` tag as well. A release whose
+# installers were built, signed, notarized and verified elsewhere gets its tag
+# when the draft is published; a run from that tag would rebuild and replace
+# the verified files (`gh release upload --clobber` below). So a tag alone
+# never starts this workflow.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
