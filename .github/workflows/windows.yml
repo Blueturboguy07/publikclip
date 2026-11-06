@@ -14,6 +14,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# publik telemetry is off on build machines: a test run is not a user.
+env:
+  DO_NOT_TRACK: "1"
+
 jobs:
   windows:
     runs-on: windows-latest

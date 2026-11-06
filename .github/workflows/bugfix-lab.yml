@@ -18,6 +18,10 @@ on:
         required: true
         default: publikclip-windows-build-fails-then-launch-fails.ps1
 
+# publik telemetry is off on build machines: a test run is not a user.
+env:
+  DO_NOT_TRACK: "1"
+
 jobs:
   windows-oracle:
     runs-on: windows-latest
