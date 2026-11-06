@@ -1,0 +1,165 @@
+# Build the release files of a telemetry/** branch: the macOS .app (unsigned)
+# and the Windows NSIS installer (unsigned). The .app is Developer ID signed,
+# notarized, stapled and packed into the dmg on the release Mac, the same way
+# as every release since 0.2.4 (this repo holds no Apple secrets).
+#
+# Artifacts only. This workflow never creates, changes or publishes a release.
+name: publik-build
+
+on:
+  push:
+    branches: ["telemetry/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publik-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The uv that rides in the bundle. 0.2.6 shipped 0.13.0; keep it the same.
+  UV_VERSION: "0.13.0"
+
+jobs:
+  macos:
+    name: macOS arm64 (.app, unsigned)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Build the app (unsigned)
+        working-directory: app
+        run: |
+          npm ci
+          npx tauri build --bundles app
+
+      - name: Check the bundle
+        run: |
+          set -euo pipefail
+          APP=app/src-tauri/target/release/bundle/macos/publikclip.app
+          RES="$APP/Contents/Resources/resources"
+          WANT=$(node -p "require('./app/src-tauri/tauri.conf.json').version")
+          GOT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+          BIN=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Contents/Info.plist")
+          echo "version: $GOT (want $WANT)  executable: $BIN  arch: $(lipo -archs "$APP/Contents/MacOS/$BIN")"
+          [ "$GOT" = "$WANT" ] || { echo "::error::bundle version $GOT, want $WANT"; exit 1; }
+          [ "$(lipo -archs "$APP/Contents/MacOS/$BIN")" = "arm64" ] || { echo "::error::not an arm64 build"; exit 1; }
+          test -x "$RES/bin/uv" || { echo "::error::bundled uv missing from $RES/bin"; exit 1; }
+          "$RES/bin/uv" --version
+          "$RES/bin/uv" --version | grep -Eq "^uv ${UV_VERSION//./\\.}( |$)" || { echo "::error::bundled uv is not $UV_VERSION"; exit 1; }
+          test -f "$RES/pipeline/pyproject.toml" || { echo "::error::pipeline source missing from bundle"; exit 1; }
+          if find "$RES" -name .venv -maxdepth 3 | grep -q .; then
+            echo "::error::a .venv rode into the app bundle"; exit 1
+          fi
+          echo "bundle size: $(du -sh "$APP" | cut -f1)"
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          echo "WANT=$WANT" >> "$GITHUB_ENV"
+
+      - name: Usage counts on the runner (local listener)
+        run: python3 .github/scripts/publik-telemetry-smoke.py "$APP/Contents/MacOS/$BIN" publikclip "$WANT" macos publikclip-telemetry-macos.json
+
+      - name: Pack the .app (ditto keeps symlinks)
+        run: |
+          ditto -c -k --keepParent "$APP" publikclip-macos-arm64-unsigned.app.zip
+          shasum -a 256 publikclip-macos-arm64-unsigned.app.zip
+          ls -la publikclip-macos-arm64-unsigned.app.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: publikclip-macos-arm64-unsigned
+          path: publikclip-macos-arm64-unsigned.app.zip
+          if-no-files-found: error
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: publikclip-telemetry-macos
+          path: publikclip-telemetry-macos.json
+          if-no-files-found: warn
+
+  windows:
+    name: Windows x64 (NSIS installer, unsigned)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Build the NSIS installer (unsigned)
+        working-directory: app
+        run: |
+          npm ci
+          npx tauri build --bundles nsis
+
+      - name: Install silently, then check the usage counts on the runner (local listener)
+        shell: pwsh
+        run: |
+          $want = (Get-Content app/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $setup = Get-ChildItem app/src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
+          if (-not $setup) { throw "no NSIS installer produced" }
+          Write-Host "installer: $($setup.Name) ($($setup.Length) bytes), want version $want"
+          if ($setup.Name -ne "publikclip_${want}_x64-setup.exe") { throw "unexpected installer name: $($setup.Name)" }
+          Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
+          $dir = Join-Path $env:LOCALAPPDATA "publikclip"
+          if (-not (Test-Path $dir)) { throw "install dir missing: $dir" }
+          $exe = Get-ChildItem $dir -Filter *.exe |
+            Where-Object { $_.Name -notmatch "uninstall" } |
+            Select-Object -First 1
+          if (-not $exe) { throw "no app exe under $dir" }
+          $uv = Join-Path $dir "resources\bin\uv.exe"
+          if (-not (Test-Path $uv)) { throw "bundled uv.exe missing: $uv" }
+          $uvVersion = & $uv --version
+          Write-Host "bundled $uvVersion"
+          if ($uvVersion -notmatch "^uv $([regex]::Escape($env:UV_VERSION))( |$)") { throw "bundled uv is not $env:UV_VERSION" }
+          Write-Host "launching $($exe.FullName)"
+          python .github/scripts/publik-telemetry-smoke.py $exe.FullName publikclip $want windows publikclip-telemetry-windows.json
+          if ($LASTEXITCODE -ne 0) { throw "usage count check failed" }
+          Get-FileHash $setup.FullName -Algorithm SHA256 | Format-List
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: publikclip-windows-setup
+          path: app/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: publikclip-telemetry-windows
+          path: publikclip-telemetry-windows.json
+          if-no-files-found: warn
