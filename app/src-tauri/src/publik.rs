@@ -294,9 +294,10 @@ fn telemetry_install_id() -> String {
         Err(_) => saved().unwrap_or(fresh), // another publik app saved its ID first
     }
 }
-fn send_event(event: &str, install_id: &str) {
+fn send_event(event: &str) {
     let say = |result: &str| if std::env::var("PUBLIK_TELEMETRY_DEBUG").as_deref() == Ok("1") { eprintln!("publik-telemetry: {event} -> {result}"); };
     if usage_off() { return say("off (opt-out)"); }
+    let install_id = telemetry_install_id(); // after the opt-out check: when usage counts are off, no telemetry.json is made
     let key = std::env::var("PUBLIK_API_KEY").ok().or_else(|| read_credential().and_then(|c| c["key"].as_str().map(String::from))).filter(|k| k.starts_with("pk_"));
     let mut body = json!({ "v": 1, "app": APP_SLUG, "install_id": install_id, "event": event, "app_version": APP_VERSION.trim_start_matches(['v', 'V']), "os": OS });
     match std::env::consts::ARCH { "aarch64" => body["arch"] = json!("arm64"), "x86_64" => body["arch"] = json!("x64"), _ => {} }
@@ -311,9 +312,8 @@ pub fn start_telemetry() {
     let s: u64 = std::env::var("PUBLIK_TELEMETRY_INTERVAL_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(0); // tests only
     let interval = Duration::from_secs(if (1..=86_400).contains(&s) { s } else { 1_800 });
     std::thread::spawn(move || {
-        let id = telemetry_install_id();
-        send_event("app_opened", &id);
-        loop { std::thread::sleep(interval); send_event("active_session", &id); }
+        send_event("app_opened");
+        loop { std::thread::sleep(interval); send_event("active_session"); }
     });
 }
 
