@@ -124,7 +124,7 @@ def test_publik_mode_without_credential_is_actionable():
     with pytest.raises(llm_mod.LlmError) as exc:
         llm_mod.resolve_endpoint("publik")
     assert "publik API isn't set up" in str(exc.value)
-    assert "Settings" in str(exc.value)
+    assert "sign in with publik" in str(exc.value)
 
 
 def test_disconnected_block_is_not_a_credential():

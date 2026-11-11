@@ -91,30 +91,28 @@ export interface UpdateNotice {
 }
 
 export interface PublikStatus {
-  provisioned: boolean
-  claim_state: 'anonymous' | 'claimed'
-  claim_url: string | null
-  add_credit_url: string | null
-  /** from POST /installs, shown verbatim — the app never writes its own */
-  disclosure: { version?: number; cost?: string; data_path?: string } | null
-  /** publik_refresh only: true when the gateway answered GET /wallet */
-  refreshed?: boolean
-  /** ~/.publikclip/publik-status.json, rewritten by the pipeline after every
-   *  call and by publik_refresh from GET /wallet */
-  status: {
-    balance_micros?: number | null
-    starter_micros?: number | null
-    starter_remaining_micros?: number | null
-    last_charge_micros?: number
-    claim_state?: 'anonymous' | 'claimed'
+  /** the publik module saw claim_state "claimed" for this computer's install */
+  signed_in: boolean
+  handle: string | null
+  /** the answer to "Choose how to pay for AI": Connect your plan / Use my own key / ask again */
+  choice: 'publik' | 'own_key' | null
+  /** what resolve_provider() picks for a run: the install key, the own Gemini key, or neither yet */
+  provider: 'publik' | 'own' | 'needs_own_key'
+  balance_micros: number | null
+  plan: { kind: 'none' | 'plan' | 'pack'; label: string | null }
+  /** the one link for money: the wallet's top_up_url */
+  top_up_url: string
+  wallet_url: string
+  has_gemini_key: boolean
+  /** ~/.publikclip/publik-status.json, written by the pipeline after every publik API call */
+  last_call: {
     needs_credit?: boolean
-    disconnected?: boolean
-    reprovision?: boolean
-    error_type?: string | null
-    top_up_url?: string | null
     message?: string | null
-    updated_at?: number
+    top_up_url?: string | null
+    disconnected?: boolean
   }
+  /** publik_refresh only: true when GET /wallet answered */
+  refreshed?: boolean | null
 }
 
 /* ---------- music / sfx library ---------- */

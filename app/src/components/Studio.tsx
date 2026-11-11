@@ -6,7 +6,7 @@ import { api } from '../api'
 import { VIDEO_EXTENSIONS, pickVideo } from '../files'
 import type { JobSummary, PublikStatus, UpdateNotice } from '../types'
 import KeyModal from './KeyModal'
-import { LINK_GATE_TITLE, LinkGateCard, accountLink, balanceLine, claimState, linkGate } from './PublikCard'
+import { balanceLine } from './PublikCard'
 
 const BRAINS: [string, string][] = [
   ['publik', 'publik API'],
@@ -50,9 +50,6 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
   const [publik, setPublik] = useState<PublikStatus | null>(null)
   const [dragging, setDragging] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
-  // true once GET /wallet has answered (or failed) this session: until then
-  // an unlinked answer from the files on disk may just be stale
-  const [walletChecked, setWalletChecked] = useState(false)
   // A newer build exists (one GET on launch; offline this stays null).
   const [update, setUpdate] = useState<UpdateNotice | null>(null)
   useEffect(() => {
@@ -119,16 +116,14 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
     }
   }, [])
 
-  // Ask the server (GET /wallet): the files on disk only change at mint or
-  // after a publik API call, so a computer linked since then still read
-  // "anonymous". Offline, the Rust side returns the files unchanged.
+  // Ask the server (GET /wallet) through the publik module: the plan or the
+  // balance may have changed in the browser. Offline, the last wallet stays.
   const refreshPublik = useCallback(() => {
     api
       .publikRefresh()
       .catch(() => api.publikStatus())
       .then(setPublik)
       .catch(() => {})
-      .finally(() => setWalletChecked(true))
   }, [])
 
   // First paint from the files (no network); the refresh below replaces it.
@@ -144,20 +139,28 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
     if (!running) refreshPublik()
   }, [running, refreshPublik])
 
-  // Default brain is publik API once this computer is linked — never the
-  // user's own Gemini key just because one is saved (a job once started 18 s
-  // before the key finished minting and billed that key directly). Once the
-  // user picks a brain this session, the picker is theirs.
-  const gate = linkGate(publik)
-  const linked = gate === 'linked'
+  // The default brain follows the answer to the gate's "Choose how to pay for
+  // AI": publik API after Connect your plan, the own Gemini key after Use my
+  // own key. Once the user picks a brain this session, the picker is theirs.
+  const provider = publik?.provider ?? null
   useEffect(() => {
-    if (linked && !pickedBrain.current) setLlm('publik')
-  }, [linked])
+    if (!provider || pickedBrain.current) return
+    setLlm(provider === 'publik' ? 'publik' : 'gemini')
+  }, [provider])
 
-  const canRun = linked && !running && source.trim() !== ''
-  const st = publik?.status
-  const link = accountLink(publik)
-  const topUp = st?.top_up_url ?? link?.url ?? null
+  // Why the picked brain cannot run yet, or null. The Rust side refuses the
+  // same cases (publik_gate::require_provider), so this is only the hint.
+  const brainHint =
+    !publik ? null
+    : llm === 'publik' && publik.provider !== 'publik'
+      ? 'Connect your plan in brain & keys to score with publik API.'
+      : llm === 'gemini' && !publik.has_gemini_key
+        ? 'Add your Gemini key in brain & keys.'
+        : null
+  const canRun = !running && source.trim() !== '' && brainHint === null
+  const lastCall = publik?.last_call
+  const needsCredit = llm === 'publik' && !!lastCall?.needs_credit
+  const topUp = lastCall?.top_up_url ?? publik?.top_up_url ?? null
 
   return (
     <div className="studio">
@@ -199,8 +202,8 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
               key={job.id}
               className={`rail-job ${job.rendered ? '' : 'partial'}`}
               onClick={() => (job.rendered ? onOpenJob(job.id) : onResume(job.id))}
-              disabled={running || (!job.rendered && !linked)}
-              title={job.rendered ? 'open results' : linked ? 'resume from checkpoint' : LINK_GATE_TITLE}
+              disabled={running}
+              title={job.rendered ? 'open results' : 'resume from checkpoint'}
             >
               <span className={`led ${job.rendered ? 'led-on' : 'led-half'}`} />
               <span className="rail-job-title">{job.title ?? job.id}</span>
@@ -209,17 +212,10 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
           ))}
         </div>
         <footer className="rail-foot">
-          {publik?.provisioned && !st?.needs_credit && !st?.disconnected && (
+          {publik && (
             <p className="rail-balance mono">
+              {publik.handle ? `@${publik.handle} · ` : ''}
               {balanceLine(publik)}
-              {claimState(publik) === 'anonymous' && publik.claim_url && (
-                <>
-                  {' · '}
-                  <button className="btn-link" onClick={() => openUrl(publik.claim_url!)}>
-                    Link this computer →
-                  </button>
-                </>
-              )}
             </p>
           )}
           <button className="btn-ghost" onClick={() => setShowKey(true)}>
@@ -259,19 +255,12 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
               className="btn-primary"
               onClick={() => onRun(source.trim(), llm, captions)}
               disabled={!canRun}
-              title={linked ? undefined : LINK_GATE_TITLE}
+              title={brainHint ?? undefined}
             >
               {running ? 'WORKING' : 'CUT IT'}
             </button>
           </div>
           {notice && <p className="input-notice mono">{notice}</p>}
-          {!linked && !running && (
-            <LinkGateCard
-              publik={publik}
-              checking={!walletChecked && gate !== 'off'}
-              onChange={setPublik}
-            />
-          )}
           <div className="run-options">
             <div className="opt-group">
               <span className="opt-label">brain</span>
@@ -289,6 +278,14 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
                 </button>
               ))}
             </div>
+            {brainHint && !running && (
+              <p className="input-notice mono">
+                {brainHint}{' '}
+                <button className="btn-link" onClick={() => setShowKey(true)}>
+                  open brain &amp; keys →
+                </button>
+              </p>
+            )}
             <div className="opt-group">
               <span className="opt-label">captions</span>
               {CAPTION_PRESETS.map((preset) => (
@@ -326,12 +323,12 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
           </section>
         )}
 
-        {linked && st?.needs_credit && (
+        {needsCredit && (
           <section className="publik-banner">
             <span className="led led-half" />
             <div>
               <strong>publik API needs more balance.</strong>{' '}
-              {st.message ?? "This computer's publik balance is used up."}
+              {lastCall?.message ?? 'Your publik balance is used up.'}
               <div className="publik-actions">
                 {topUp && (
                   <button className="btn-secondary publik-link" onClick={() => openUrl(topUp)}>

@@ -70,13 +70,29 @@ Creative-Commons tracks from Freesound/Jamendo straight from the app.
   `credits.txt` is written next to every rendered clip that uses one,
   listing its attribution. NC and ND licences are never fetched, full stop.
 
+## Sign in with publik
+
+publikclip opens with Sign in with publik. The first window asks you to sign
+in in your browser; the app continues when you are signed in. Then it asks once
+how it pays for AI: **Connect your plan** (scoring runs on publik API) or **Use
+my own key** (your Gemini key, or Ollama). Change the answer at any time under
+brain & keys. The publik module that does this is
+`app/src-tauri/src/publik.rs` (from
+[publikhq.com/sdk/publik.rs.md](https://publikhq.com/sdk/publik.rs.md)); its
+window is `app/src-tauri/src/publik_gate.rs` and `app/gate.html`. This
+computer's publik key lives in the publik credential file
+(`~/Library/Application Support/publik/apps/publikclip.json` on macOS,
+`%LOCALAPPDATA%\publik\apps\publikclip.json` on Windows), mode 0600; the
+pipeline reads it from there.
+
 ## Usage counts
 
-publikclip sends two usage events to publik: `app_opened` once per launch and
-`active_session` every 30 minutes while it runs. An event holds the app name
-and version, the operating system, the CPU type and a random install ID, plus
-this computer's publik key when it uses publik API. No video, transcript, file
-name or prompt is sent. Turn it off with `DO_NOT_TRACK=1` in the environment.
+The publik module counts signed-in users. After the sign-in it sends two usage
+events to publik: `app_opened` once per launch and `active_session` every 30
+minutes while the app runs. An event holds the app name and version, the
+operating system, the CPU type and a random install ID, and it carries this
+computer's publik key. No video, transcript, file name or prompt is sent. Turn
+it off with `DO_NOT_TRACK=1` in the environment.
 Details: [publikhq.com/skills/telemetry.md](https://publikhq.com/skills/telemetry.md).
 
 ## Layout

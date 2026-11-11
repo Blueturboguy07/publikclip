@@ -1,512 +1,343 @@
-// publik API provisioning for the desktop shell. One public app token names
-// this app (never a user); onboarding trades it for an install-bound key
-// through the system curl — the same precedent as check_ollama, and the only
-// HTTP this shell does. The pipeline's own venv does not exist yet at
-// onboarding time (it bootstraps on the first run), so this cannot be a
-// sidecar call. The key lands in ~/.publikclip/secrets.json (0600) next to the
-// own-key fields; the pipeline reads it from there.
-use std::fs;
-use std::io::Write;
-use std::path::Path;
-use std::process::Stdio;
-
+// publik.rs — Sign in with publik, usage counting, and publik API as one provider option.
+// At app start, before any window of your own: `let gate = publik::ensure_signed_in(&mut ui);`. It
+//   1. loads or provisions this computer's publik key (POST /api/v1/installs);
+//   2. shows Sign in with publik until GET /api/v1/wallet says "claimed" (no other way past it);
+//   3. when USES_AI: asks once how the app pays for AI and stores the answer (set_choice() changes it);
+//   4. starts usage counting: app_opened now, active_session every 30 minutes (POST /api/v1/telemetry).
+//
+// This is the publik module from https://publikhq.com/sdk/publik.rs.md. publikclip's own glue
+// (the Tauri gate window, the status commands) is in publik_gate.rs. The pipeline reads the
+// credential file this module writes (publikclip_pipeline/config.py publik_shared_file()).
+// The parts of the module publikclip does not call (TerminalUi, search) stay, so the file is the
+// module as published; they are allowed to be unused.
+#![allow(dead_code)]
 use serde_json::{json, Value};
+use std::io::{BufRead, Write};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use crate::{home_dir, quiet_command};
-
-const PUBLIK_API: &str = "https://publikhq.com/api/v1";
-// Public by design: it only authorises minting one capped key attributed to
-// publikclip, which is what the app itself does — and every user builds this
-// app from source, so it has to live in the repo. Rotated by committing a new
-// file; overridable at build time (PUBLIK_APP_TOKEN) for a CI-cut build.
+pub const APP_SLUG: &str = "publikclip";
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// false: the app calls no model. It still signs in and counts users; it skips the plan screen.
+pub const USES_AI: bool = true;
+/// Ask for a tier, never a vendor model name.
+pub const MODELS: [&str; 3] = ["publik-fast", "publik-balanced", "publik-smart"];
+// Public by design: it can only mint capped keys attributed to this app, and
+// every user who builds from source needs it, so it lives in the repo
+// (publik-app-token.txt next to Cargo.toml, tracked; build.rs watches it).
 const APP_TOKEN: &str = match option_env!("PUBLIK_APP_TOKEN") {
     Some(t) => t,
     None => include_str!("../publik-app-token.txt"),
 };
-const DISCLOSURE_VERSION: u32 = 1;
+const OS: &str = if cfg!(target_os = "macos") { "macos" } else if cfg!(windows) { "windows" } else { "linux" };
 
-fn secrets_path() -> std::path::PathBuf {
-    home_dir().join("secrets.json")
+fn origin() -> String { std::env::var("PUBLIK_ORIGIN").unwrap_or_else(|_| "https://publikhq.com".into()) } // PUBLIK_ORIGIN: tests only
+pub fn default_base_url() -> String { format!("{}/api/v1", origin()) }
+
+pub enum Provider { Own { base_url: String, api_key: String }, Publik { base_url: String, api_key: String }, NeedsOwnKey }
+pub struct Screen { pub id: &'static str, pub title: &'static str, pub body: String, pub note: Option<&'static str>, pub buttons: Vec<(&'static str, &'static str)> }
+/// show(): draw the screen and return the button id pressed. Once `done` is set (the gate saw the sign-in), close it and return None.
+pub trait GateUi { fn show(&mut self, screen: &Screen, done: Arc<AtomicBool>) -> Option<&'static str>; fn open_url(&mut self, url: &str); }
+
+/// ~/Library/Application Support/publik, %LOCALAPPDATA%\publik, ~/.config/publik: shared by every publik app.
+fn publik_dir() -> PathBuf {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
+    let base = if cfg!(target_os = "macos") { home.join("Library/Application Support") }
+        else if cfg!(windows) { std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or(home.join("AppData/Local")) }
+        else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or(home.join(".config")) };
+    base.join("publik")
 }
+pub fn credential_path() -> PathBuf { publik_dir().join("apps").join(format!("{APP_SLUG}.json")) }
 
-fn status_path() -> std::path::PathBuf {
-    home_dir().join("publik-status.json")
+pub fn read_credential() -> Option<Value> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(credential_path()).ok()?).ok()?;
+    v["key"].as_str().filter(|k| k.starts_with("pk_"))?;
+    Some(v)
 }
-
-fn read_json(path: &Path) -> Value {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .filter(|v| v.is_object())
-        .unwrap_or_else(|| json!({}))
-}
-
-pub(crate) fn read_secrets() -> Value {
-    read_json(&secrets_path())
-}
-
-/// Write the whole secrets object and chmod 600 — the one write path every
-/// key goes through (Gemini, Pexels, publik).
-pub(crate) fn write_secrets_at(path: &Path, current: &Value) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    fs::write(path, serde_json::to_string_pretty(current).unwrap()).map_err(|e| e.to_string())?;
+fn write_credential(v: &Value) -> Result<(), String> {
+    let path = credential_path();
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(&path, serde_json::to_string_pretty(v).unwrap()).map_err(|e| e.to_string())?;
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-    }
+    { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)); }
     Ok(())
 }
+/// The person's answer to the plan screen: Some("publik"), Some("own_key"), or None to ask again. Settings call it.
+pub fn set_choice(choice: Option<&str>) { if let Some(mut c) = read_credential() { c["choice"] = json!(choice); let _ = write_credential(&c); } }
 
-/// Merge one top-level field into secrets.json, keeping every other key.
-pub(crate) fn merge_secret(field: &str, value: Value) -> Result<(), String> {
-    let mut current = read_secrets();
-    current[field] = value;
-    write_secrets_at(&secrets_path(), &current)
-}
-
-/// POST against the gateway via curl.
-fn curl_json(url: &str, bearer: Option<&str>, body: &Value) -> Result<(u16, Value), String> {
-    curl_request("POST", url, bearer, Some(body), 20)
-}
-
-/// GET against the gateway via curl, with this computer's key.
-fn curl_get(url: &str, bearer: &str) -> Result<(u16, Value), String> {
-    curl_request("GET", url, Some(bearer), None, 10)
-}
-
-/// One gateway call through the system curl. A JSON body goes on stdin and a
-/// bearer key rides a curl config read from stdin — never argv, which is
-/// world-readable in `ps`. The status code arrives on the trailing line.
-pub(crate) fn curl_request(
-    method: &str,
-    url: &str,
-    bearer: Option<&str>,
-    body: Option<&Value>,
-    timeout_secs: u32,
-) -> Result<(u16, Value), String> {
-    let timeout = timeout_secs.to_string();
-    let mut cmd = quiet_command("curl");
-    cmd.args([
-        "-sS", "-m", &timeout, "-X", method, url,
-        "-H", "accept: application/json",
-        "-w", "\n%{http_code}",
-    ]);
-    if body.is_some() {
-        cmd.args(["-H", "content-type: application/json"]);
+/// The key this app uses: the stored choice decides. PUBLIK_API_KEY / PUBLIK_API_BASE_URL override (development).
+pub fn resolve_provider(user_key: Option<(String, String)>) -> Provider {
+    if let Ok(key) = std::env::var("PUBLIK_API_KEY") {
+        return Provider::Publik { base_url: std::env::var("PUBLIK_API_BASE_URL").unwrap_or_else(|_| default_base_url()), api_key: key };
     }
-    let stdin_payload = match (bearer, body) {
-        // A keyed call's body is never secret (the revoke call's is empty),
-        // so the stdin slot goes to the header.
-        (Some(key), Some(body)) => {
-            cmd.args(["-K", "-", "--data-binary", &body.to_string()]);
-            format!("header = \"authorization: Bearer {key}\"\n")
+    if let Some(c) = read_credential().filter(|c| c["choice"] == "publik") {
+        return Provider::Publik { base_url: c["base_url"].as_str().map(String::from).unwrap_or_else(default_base_url), api_key: c["key"].as_str().unwrap_or_default().into() };
+    }
+    match user_key.filter(|(_, k)| !k.is_empty()) { Some((base_url, api_key)) => Provider::Own { base_url, api_key }, None => Provider::NeedsOwnKey }
+}
+
+/// One curl call; `stdin` carries the body or a config with the key. Err: publik is not reachable.
+/// publikclip: through quiet_command, so no console window flashes on Windows.
+fn curl(args: &[&str], stdin: &str) -> Result<(u16, Value), String> {
+    let mut child = crate::quiet_command("curl").args(["-sS", "-w", "\n%{http_code}"]).args(args)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("curl: {e}"))?;
+    child.stdin.take().unwrap().write_all(stdin.as_bytes()).map_err(|e| e.to_string())?;
+    let out = String::from_utf8_lossy(&child.wait_with_output().map_err(|e| e.to_string())?.stdout).to_string();
+    let (payload, code) = out.rsplit_once('\n').unwrap_or(("", &out));
+    match code.trim().parse::<u16>().unwrap_or(0) {
+        0 => Err("publik is not reachable. Check your connection.".into()),
+        code => Ok((code, serde_json::from_str(payload).unwrap_or(json!({})))),
+    }
+}
+fn key_config(key: &str) -> String { format!("header = \"Authorization: Bearer {key}\"\n") }
+
+/// POST /api/v1/installs: this computer's publik key. Err is a readable message.
+pub fn provision() -> Result<Value, String> {
+    let runtime = std::env::var("PUBLIK_APP_TOKEN").unwrap_or_default();
+    let token = if runtime.trim().is_empty() { APP_TOKEN.trim() } else { runtime.trim() };
+    if !token.starts_with("pat_") { return Err("This build has no publik app token. Ask the developer for a new build.".into()); }
+    let mut prior = read_credential().unwrap_or(json!({}));
+    let mut install_id = prior["install_id"].as_str().map(String::from).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    for _ in 0..2 {
+        let body = json!({ "app_token": token, "app_slug": APP_SLUG, "app_version": APP_VERSION, "os": OS, "arch": std::env::consts::ARCH,
+            "install_id": install_id, "disclosure_version": 1, "dialects": ["chat_completions"] });
+        let url = format!("{}/api/v1/installs", origin());
+        let (code, res) = curl(&["-m", "20", "-X", "POST", &url, "-H", "content-type: application/json", "--data-binary", "@-"], &body.to_string())?;
+        let key = res["key"].as_str().or(if code == 200 { prior["key"].as_str() } else { None }).map(String::from);
+        if let (200 | 201, Some(key)) = (code, key) {
+            let c = json!({ "key": key, "base_url": res["base_url"].as_str().map(String::from).unwrap_or_else(default_base_url),
+                "install_id": res["install_id"].as_str().unwrap_or(&install_id), "claim_url": res["claim_url"], "choice": prior["choice"] });
+            write_credential(&c)?; // the key reaches disk before anything else sees it
+            return Ok(c);
         }
-        (Some(key), None) => {
-            cmd.args(["-K", "-"]);
-            format!("header = \"authorization: Bearer {key}\"\n")
-        }
-        (None, Some(body)) => {
-            cmd.args(["--data-binary", "@-"]);
-            body.to_string()
-        }
-        (None, None) => String::new(),
-    };
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("curl: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(stdin_payload.as_bytes()).map_err(|e| e.to_string())?;
+        if code == 200 || res["error"]["type"] == "install_revoked" { install_id = uuid::Uuid::new_v4().to_string(); prior = json!({}); continue; }
+        return Err(res["error"]["message"].as_str().map(String::from).unwrap_or_else(|| format!("publik could not set up this computer ({code}).")));
     }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    parse_curl_output(&String::from_utf8_lossy(&out.stdout))
+    Err("publik could not set up this computer.".into())
 }
 
-fn parse_curl_output(text: &str) -> Result<(u16, Value), String> {
-    let (payload, code) = text.rsplit_once('\n').unwrap_or(("", text));
-    let code: u16 = code.trim().parse().unwrap_or(0);
-    if code == 0 {
-        return Err("publik API is unreachable right now — check your connection, or use your own key for now.".into());
+/// GET /api/v1/wallet: (status, wallet or None, message). Err: publik is not reachable.
+pub fn read_wallet(key: &str) -> Result<(u16, Option<Value>, Option<String>), String> {
+    let url = format!("{}/api/v1/wallet", origin());
+    let (code, mut b) = curl(&["-m", "15", "-K", "-", &url], &key_config(key))?;
+    if code != 200 || !b["claim_state"].is_string() { return Ok((code, None, b["error"]["message"].as_str().map(String::from))); }
+    if !b["plan"].is_object() { b["plan"] = json!({ "kind": "none", "label": null }); }
+    Ok((code, Some(b), None))
+}
+
+/// The words of the gate. The same in every publik module.
+pub fn gate_screen(id: &'static str, w: Option<&Value>, note: Option<&'static str>, message: Option<String>) -> Screen {
+    if id == "unreachable" {
+        return Screen { id, title: "Sign in with publik", body: message.unwrap_or_else(|| "publik is not reachable. Check your connection.".into()), note, buttons: vec![("retry", "Retry")] };
     }
-    Ok((code, serde_json::from_str(payload).unwrap_or_else(|_| json!({}))))
-}
-
-fn device_name() -> String {
-    quiet_command("hostname")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.chars().take(120).collect())
-        .unwrap_or_else(|| "this computer".into())
-}
-
-fn os_slug() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        "linux"
+    if id == "sign_in" {
+        return Screen { id, title: "Sign in with publik", note, buttons: vec![("sign_in", "Sign in with publik")],
+            body: "This app uses your publik account. Click Sign in with publik, then sign in in your browser. This window continues when you are signed in.".into() };
     }
-}
-
-fn mint_body(install_id: &str) -> Value {
-    json!({
-        "app_token": APP_TOKEN.trim(),
-        "app_slug": "publikclip",
-        "app_version": env!("CARGO_PKG_VERSION"),
-        "os": os_slug(),
-        "device_name": device_name(),
-        "install_id": install_id,
-        "disclosure_version": DISCLOSURE_VERSION,
-        "dialects": ["gemini"],
-    })
-}
-
-fn gateway_message(res: &Value) -> Option<String> {
-    res["error"]["message"].as_str().map(String::from)
-}
-
-/// The secrets.json `publik` block from a successful POST /installs. A 200
-/// replay carries `key: null`; the key we already hold is kept then. Returns
-/// None when there is no key either way (the caller re-mints once).
-pub(crate) fn block_from_mint(res: &Value, prior: &Value, install_id: &str) -> Option<Value> {
-    let key = res["key"]
-        .as_str()
-        .or_else(|| prior["key"].as_str())
-        .filter(|k| !k.is_empty())?
-        .to_string();
-    let pick = |field: &str| -> Value {
-        if res[field].is_null() { prior[field].clone() } else { res[field].clone() }
-    };
-    Some(json!({
-        "key": key,
-        "key_id": pick("key_id"),
-        "base_url": res["base_url"].as_str().or_else(|| prior["base_url"].as_str()).unwrap_or(PUBLIK_API),
-        "claim_url": pick("claim_url"),
-        "install_id": res["install_id"].as_str().unwrap_or(install_id),
-        "claim_state": res["claim_state"].as_str().or_else(|| res["wallet"]["claim_state"].as_str()).unwrap_or("anonymous"),
-        "add_credit_url": res["wallet"]["add_credit_url"].clone(),
-        "disclosure": pick("disclosure"),
-        "disclosure_version": DISCLOSURE_VERSION,
-        "app_version": env!("CARGO_PKG_VERSION"),
-        "minted_at": now_rfc3339(),
-    }))
-}
-
-/// Seed publik-status.json from the mint so the first balance line is honest
-/// before the first scoring call (the pipeline rewrites it after every call).
-pub(crate) fn status_from_mint(res: &Value) -> Value {
-    let wallet = &res["wallet"];
-    let balance = [&res["balance_micros"], &wallet["balance_micros"], &wallet["available_micros"], &res["starter_micros"]]
-        .into_iter()
-        .find(|v| v.is_number())
-        .cloned()
-        .unwrap_or(Value::Null);
-    json!({
-        "balance_micros": balance,
-        "starter_micros": res["starter_micros"],
-        // a replay (key: null) reports starter_micros 0 = "no NEW starter",
-        // not "none left"; leave it to the first call's header then
-        "starter_remaining_micros": if res["key"].is_null() { Value::Null } else { res["starter_micros"].clone() },
-        "claim_state": res["claim_state"].as_str().or_else(|| wallet["claim_state"].as_str()).unwrap_or("anonymous"),
-        "top_up_url": wallet["top_up_url"],
-        "needs_credit": false,
-        "disconnected": false,
-    })
-}
-
-/// Integer micros from a JSON number (tolerates a float-encoded integer).
-fn micros(v: &Value) -> Option<i64> {
-    v.as_i64().or_else(|| v.as_f64().map(|f| f.round() as i64))
-}
-
-/// publik-status.json after a 200 GET /wallet. Merged over the previous file,
-/// like the pipeline's own writes: fields the wallet does not carry
-/// (starter_micros, last_charge_micros, week_*) keep their last value. None
-/// when the body is not a wallet (no balance, or an unknown claim state).
-pub(crate) fn status_from_wallet(prior: &Value, wallet: &Value, now: f64) -> Option<Value> {
-    let balance = micros(&wallet["balance_micros"])?;
-    let claim_state = wallet["claim_state"]
-        .as_str()
-        .filter(|s| *s == "anonymous" || *s == "claimed")?;
-    let mut status = if prior.is_object() { prior.clone() } else { json!({}) };
-    status["balance_micros"] = json!(balance);
-    status["claim_state"] = json!(claim_state);
-    // no starter block = no starter left to spend
-    status["starter_remaining_micros"] = json!(micros(&wallet["starter"]["remaining_micros"]).unwrap_or(0));
-    status["top_up_url"] = wallet["top_up_url"].clone();
-    status["needs_credit"] = json!(balance == 0);
-    status["disconnected"] = json!(false);
-    status["updated_at"] = json!(now);
-    if let Some(obj) = status.as_object_mut() {
-        // a 402 message or a 401 flag from an earlier call is stale now
-        for stale in ["message", "reprovision", "error_type"] {
-            obj.remove(stale);
-        }
+    let w = w.cloned().unwrap_or(json!({ "plan": { "kind": "none" } }));
+    let who = match w["account"]["handle"].as_str() { Some(h) => format!("You are signed in as @{h}."), None => "You are signed in to publik.".into() };
+    if !has_plan(&w) {
+        return Screen { id, title: "Choose how to pay for AI", note, body: format!("{who} This app uses AI. Get a publik plan, or use your own key."),
+            buttons: vec![("get_plan", "Get a plan"), ("own_key", "Use my own key")] };
     }
-    Some(status)
+    let what = if w["plan"]["kind"] == "plan" { format!("Your plan: {}.", w["plan"]["label"].as_str().unwrap_or("publik")) }
+        else { format!("Your balance: ${:.2}.", w["balance_micros"].as_i64().unwrap_or(0) as f64 / 1_000_000.0) };
+    Screen { id, title: "Connect your plan", note, body: format!("{who} {what} Connect it to use AI in this app, or use your own key."),
+        buttons: vec![("connect", "Connect your plan"), ("own_key", "Use my own key")] }
 }
+fn claimed(w: &Value) -> bool { w["claim_state"] == "claimed" }
+pub fn has_plan(w: &Value) -> bool { w["plan"]["kind"].as_str().unwrap_or("none") != "none" || w["balance_micros"].as_i64().unwrap_or(0) > 0 }
 
-/// publik-status.json after GET /wallet answered 401/403: this computer's
-/// key no longer works. Same fields the pipeline writes on that answer.
-pub(crate) fn status_after_auth_failure(prior: &Value, code: u16, res: &Value, now: f64) -> Value {
-    let mut status = if prior.is_object() { prior.clone() } else { json!({}) };
-    status["disconnected"] = json!(true);
-    status["reprovision"] = json!(code == 401 || res["error"]["reprovision"] == json!(true));
-    status["error_type"] = res["error"]["type"].clone();
-    status["updated_at"] = json!(now);
-    status
-}
-
-/// secrets.json's publik block after a 200 GET /wallet: the server's claim
-/// state, the live claim link while anonymous (the wallet re-issues an
-/// expired code), and no claim link once claimed.
-pub(crate) fn block_from_wallet(block: &Value, wallet: &Value) -> Value {
-    let mut next = block.clone();
-    let claim_state = wallet["claim_state"].as_str().unwrap_or("anonymous");
-    next["claim_state"] = json!(claim_state);
-    if claim_state == "claimed" {
-        next["claim_url"] = Value::Null;
-    } else if let Some(url) = wallet["claim_url"].as_str().filter(|u| !u.is_empty()) {
-        next["claim_url"] = json!(url);
-    }
-    if let Some(url) = wallet["add_credit_url"].as_str().filter(|u| !u.is_empty()) {
-        next["add_credit_url"] = json!(url);
-    }
-    next
-}
-
-/// Founder rule (2026-09-28): publikclip runs only on a computer whose
-/// publik API install is linked to a publik account, whichever brain scores.
-/// `status` is publik_status()'s shape.
-pub(crate) fn is_linked(status: &Value) -> bool {
-    status["provisioned"] == json!(true)
-        && status["claim_state"] == json!("claimed")
-        && status["status"]["disconnected"] != json!(true)
-}
-
-pub(crate) const LINK_REQUIRED: &str =
-    "Link your publik account to start. publikclip runs on a linked publik account.";
-
-/// The backstop behind the Studio's link card: run_job and resume_job refuse
-/// to start on an unlinked computer. Reads the files publik_refresh keeps
-/// current; no network.
-pub(crate) fn require_linked() -> Result<(), String> {
-    if is_linked(&publik_status()?) {
-        Ok(())
-    } else {
-        Err(LINK_REQUIRED.into())
-    }
-}
-
-fn now_secs() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
-
-fn new_install_id() -> String {
-    uuid::Uuid::new_v4().to_string()
-}
-
-/// Mint (or re-fetch) this computer's key. Runs only after the user tapped
-/// "Continue with publik API" — the frontend owns that consent moment.
-#[tauri::command]
-pub async fn publik_provision() -> Result<Value, String> {
-    let token = APP_TOKEN.trim();
-    if !token.starts_with("pat_") {
-        return Err("This build has no publik API app token. Use your own key for now.".into());
-    }
-    let mut secrets = read_secrets();
-    let prior = secrets["publik"].clone();
-    let mut install_id = prior["install_id"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .unwrap_or_else(new_install_id);
-    let mut prior_for_merge = prior.clone();
-    // At most two mints: a replay with no key on disk, or an install finished
-    // by its owner (403 install_revoked), each re-mint once under a fresh
-    // install_id; anything else is an answer.
-    for attempt in 0..2 {
-        let (code, res) = curl_json(&format!("{PUBLIK_API}/installs"), None, &mint_body(&install_id))?;
-        match code {
-            200 | 201 => {}
-            403 if attempt == 0 && res["error"]["type"] == "install_revoked" => {
-                install_id = new_install_id();
-                prior_for_merge = json!({});
-                continue;
+/// Show a screen; with `until`, poll GET /wallet every 3 s for at most 10 minutes. "done": the poll saw it; "timeout": it did not.
+fn ask(ui: &mut dyn GateUi, screen: &Screen, key: &str, until: Option<fn(&Value) -> bool>) -> &'static str {
+    let done = Arc::new(AtomicBool::new(false));
+    let polled: Arc<Mutex<Option<&'static str>>> = Arc::new(Mutex::new(None));
+    if let Some(until) = until {
+        let (done, polled, key) = (done.clone(), polled.clone(), key.to_string());
+        std::thread::spawn(move || {
+            let mut result = "timeout";
+            'poll: for _ in 0..200 { // 200 x 3 s = 10 minutes
+                for _ in 0..30 { std::thread::sleep(Duration::from_millis(100)); if done.load(Ordering::SeqCst) { return; } }
+                if let Ok((_, Some(w), _)) = read_wallet(&key) { if until(&w) { result = "done"; break 'poll; } }
             }
-            429 => {
-                return Err(gateway_message(&res).unwrap_or_else(|| {
-                    "publik API is busy setting up new computers. Try again in a minute, or use your own key.".into()
-                }))
-            }
-            _ => {
-                return Err(format!(
-                    "publik API couldn't set up this computer ({code}{}). Use your own key for now.",
-                    gateway_message(&res).map(|m| format!(": {m}")).unwrap_or_default()
-                ))
-            }
-        }
-        let Some(block) = block_from_mint(&res, &prior_for_merge, &install_id) else {
-            if attempt == 0 {
-                install_id = new_install_id();
-                prior_for_merge = json!({});
-                continue;
-            }
-            return Err("publik API didn't return a key. Use your own key for now.".into());
+            *polled.lock().unwrap() = Some(result);
+            done.store(true, Ordering::SeqCst);
+        });
+    }
+    let action = ui.show(screen, done.clone());
+    done.store(true, Ordering::SeqCst);
+    let polled = *polled.lock().unwrap();
+    action.or(polled).unwrap_or("retry")
+}
+
+/// The gate (see the top of the file). Returns (key, wallet, choice) once the person is signed in; choice is None when USES_AI is false.
+pub fn ensure_signed_in(ui: &mut dyn GateUi) -> (String, Value, Option<String>) {
+    if std::env::var_os("PUBLIK_SELF_TEST").is_some() { println!("{}", self_test()); std::process::exit(0); }
+    let (mut sign_note, mut sign_poll, mut plan_note, mut plan_poll): (Option<&'static str>, bool, Option<&'static str>, bool) = (None, true, None, false);
+    loop {
+        let env_key = std::env::var("PUBLIK_API_KEY").ok().filter(|k| !k.is_empty());
+        let c = match env_key.clone().map(|k| Ok(json!({ "key": k }))).or_else(|| read_credential().map(Ok)).unwrap_or_else(provision) {
+            Ok(c) => c,
+            Err(e) => { ask(ui, &gate_screen("unreachable", None, None, Some(e)), "", None); continue; }
         };
-        secrets["publik"] = block;
-        write_secrets_at(&secrets_path(), &secrets)?; // the key hits disk before anything else
-        let _ = fs::write(status_path(), status_from_mint(&res).to_string());
-        return publik_status();
+        let key = c["key"].as_str().unwrap_or_default().to_string();
+        let w = match read_wallet(&key) {
+            Err(_) => { ask(ui, &gate_screen("unreachable", None, None, None), "", None); continue; }
+            Ok((401, _, _)) if env_key.is_none() => { let _ = write_credential(&json!({})); continue; } // a revoked key: provision again
+            Ok((_, None, message)) => { ask(ui, &gate_screen("unreachable", None, None, message), "", None); continue; }
+            Ok((_, Some(w), _)) => w,
+        };
+        if !claimed(&w) {
+            let a = ask(ui, &gate_screen("sign_in", Some(&w), sign_note, None), &key, if sign_poll { Some(claimed) } else { None });
+            if a == "sign_in" {
+                ui.open_url(w["claim_url"].as_str().or(c["claim_url"].as_str()).unwrap_or(&format!("{}/wallet", origin())));
+                (sign_note, sign_poll) = (Some("Waiting for you to sign in in your browser."), true);
+            }
+            if a == "timeout" { (sign_note, sign_poll) = (Some("No sign-in after 10 minutes. Click Sign in with publik to try again."), false); }
+            continue;
+        }
+        let mut choice = if USES_AI { read_credential().and_then(|c| c["choice"].as_str().map(String::from)) } else { None };
+        if USES_AI && choice.is_none() {
+            if has_plan(&w) { (plan_note, plan_poll) = (None, false); } // the plan is there: Connect your plan
+            let a = ask(ui, &gate_screen("choose", Some(&w), plan_note, None), &key, if plan_poll { Some(has_plan) } else { None });
+            (plan_note, plan_poll) = (None, false);
+            if a == "get_plan" {
+                ui.open_url(w["top_up_url"].as_str().unwrap_or(&format!("{}/wallet", origin())));
+                (plan_note, plan_poll) = (Some("Waiting for your plan. Finish in your browser."), true);
+            }
+            if a == "timeout" { plan_note = Some("No plan after 10 minutes. Click Get a plan to try again."); }
+            if a != "connect" && a != "own_key" { continue; } // "done": the plan is there; the next screen is Connect your plan
+            choice = Some(if a == "connect" { "publik" } else { "own_key" }.to_string());
+            set_choice(choice.as_deref());
+        }
+        start_telemetry();
+        return (key, w, choice);
     }
-    Err("publik API couldn't set up this computer. Use your own key for now.".into())
 }
 
-/// Everything the UI shows — never the key itself.
-#[tauri::command]
-pub fn publik_status() -> Result<Value, String> {
-    let secrets = read_secrets();
-    let block = &secrets["publik"];
-    let status = read_json(&status_path());
-    let claim_state = status["claim_state"]
-        .as_str()
-        .or_else(|| block["claim_state"].as_str())
-        .unwrap_or("anonymous");
-    Ok(json!({
-        "provisioned": block["key"].as_str().map(|k| !k.is_empty()).unwrap_or(false),
-        "claim_state": claim_state,
-        "claim_url": block["claim_url"],
-        "add_credit_url": block["add_credit_url"],
-        "disclosure": block["disclosure"],
-        "status": status,
-    }))
+/// Builder check, run by the BUILT app: PUBLIK_SELF_TEST=1 makes ensure_signed_in() print this line and exit.
+pub fn self_test() -> String {
+    let result = provision().and_then(|c| read_wallet(c["key"].as_str().unwrap_or_default())).and_then(|(code, w, message)| match w {
+        Some(_) => Ok(()),
+        None => Err(message.unwrap_or_else(|| format!("GET /wallet answered {code}"))),
+    });
+    match result { Ok(()) => format!("publik self-test: ok {APP_SLUG} {APP_VERSION}"), Err(e) => format!("publik self-test: failed: {e}") }
 }
 
-/// Ask the gateway for this computer's wallet (GET /wallet) and rewrite the
-/// status file from it, so the claim state and balance on screen are the
-/// server's — not what was true at mint or at the last scoring call. A 401/403
-/// marks the key disconnected. Offline or any other answer leaves both files
-/// alone. Returns publik_status() plus `refreshed`: whether the server answered.
-#[tauri::command]
-pub async fn publik_refresh() -> Result<Value, String> {
-    let mut secrets = read_secrets();
-    let block = secrets["publik"].clone();
-    let mut refreshed = false;
-    if let Some(key) = block["key"].as_str().filter(|k| !k.is_empty()) {
-        let base = block["base_url"].as_str().unwrap_or(PUBLIK_API).trim_end_matches('/');
-        let prior = read_json(&status_path());
-        match curl_get(&format!("{base}/wallet"), key) {
-            Ok((200, wallet)) => {
-                if let Some(status) = status_from_wallet(&prior, &wallet, now_secs()) {
-                    let next = block_from_wallet(&block, &wallet);
-                    if next != block {
-                        secrets["publik"] = next;
-                        write_secrets_at(&secrets_path(), &secrets)?;
-                    }
-                    let _ = fs::write(status_path(), status.to_string());
-                    refreshed = true;
-                }
-            }
-            Ok((code @ (401 | 403), res)) => {
-                let status = status_after_auth_failure(&prior, code, &res, now_secs());
-                let _ = fs::write(status_path(), status.to_string());
-                refreshed = true;
-            }
-            _ => {}
+/// A terminal UI for a command-line app. A desktop app passes its own GateUi (see the page).
+pub struct TerminalUi;
+impl GateUi for TerminalUi {
+    fn show(&mut self, s: &Screen, done: Arc<AtomicBool>) -> Option<&'static str> {
+        println!("\n{}\n{}{}", s.title, s.body, s.note.map(|n| format!("\n{n}")).unwrap_or_default());
+        for (i, (_, label)) in s.buttons.iter().enumerate() { println!("  {}. {label}", i + 1); }
+        let answered = Arc::new(AtomicBool::new(false));
+        let (d, a) = (done.clone(), answered.clone());
+        std::thread::spawn(move || { while !d.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(200)); } if !a.load(Ordering::SeqCst) { println!("\nDone. Press Enter to continue."); } });
+        loop {
+            print!("{}", if s.buttons.len() > 1 { "Type a number and press Enter: " } else { "Press Enter: " });
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            if std::io::stdin().lock().read_line(&mut line).unwrap_or(0) == 0 { while !done.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(200)); } return None; }
+            if done.load(Ordering::SeqCst) { return None; }
+            let n: usize = line.trim().parse().unwrap_or(1);
+            if let Some((action, _)) = s.buttons.get(n.wrapping_sub(1)) { answered.store(true, Ordering::SeqCst); return Some(action); }
         }
     }
-    let mut out = publik_status()?;
-    out["refreshed"] = json!(refreshed);
-    Ok(out)
-}
-
-/// "Disconnect publik API": self-revoke, forget the key, keep install_id so a
-/// reconnect re-keys the same install (no second starter).
-#[tauri::command]
-pub async fn publik_disconnect() -> Result<Value, String> {
-    let mut secrets = read_secrets();
-    let block = secrets["publik"].clone();
-    if let Some(key) = block["key"].as_str().filter(|k| !k.is_empty()) {
-        let base = block["base_url"].as_str().unwrap_or(PUBLIK_API).trim_end_matches('/');
-        // Best effort: offline still disconnects locally.
-        let _ = curl_json(&format!("{base}/installs/revoke"), Some(key), &json!({}));
+    fn open_url(&mut self, url: &str) {
+        println!("Open this link if your browser does not open: {url}");
+        let _ = if cfg!(target_os = "macos") { Command::new("open").arg(url).spawn() }
+            else if cfg!(windows) { Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn() }
+            else { Command::new("xdg-open").arg(url).spawn() };
     }
-    secrets["publik"] = json!({"install_id": block["install_id"]});
-    write_secrets_at(&secrets_path(), &secrets)?;
-    let _ = fs::remove_file(status_path());
-    publik_status()
 }
 
-/// RFC 3339 UTC from SystemTime — informational only, not worth a chrono dep.
-fn now_rfc3339() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    // Howard Hinnant's civil_from_days.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+// ---------- usage counting: /skills/telemetry.md sections 3-5 ----------
+static TELEMETRY_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn usage_off() -> bool {
+    let env = |n: &str| std::env::var(n).unwrap_or_default().trim().to_lowercase();
+    if !["", "0", "false"].contains(&env("DO_NOT_TRACK").as_str()) || ["0", "false", "off"].contains(&env("PUBLIK_TELEMETRY").as_str()) { return true; }
+    std::fs::read_to_string(publik_dir().join("consent.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).map(|v| v["usage"] == false).unwrap_or(false)
+}
+fn is_uuid_v4(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36 && b.iter().enumerate().all(|(i, c)| if [8, 13, 18, 23].contains(&i) { *c == b'-' } else { c.is_ascii_hexdigit() })
+        && b[14] == b'4' && b"89abAB".contains(&b[19])
+}
+fn utc_now() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let (days, rem) = ((secs / 86_400) as i64 + 719_468, secs % 86_400); // days since 0000-03-01
+    let (era, doe) = (days / 146_097, days % 146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+    let (day, month) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", yoe + era * 400 + i64::from(month <= 2), month, day, rem / 3600, rem % 3600 / 60, rem % 60)
+}
+/// One random UUID per computer account, shared by every publik app, in <publik dir>/telemetry.json (mode 0600).
+fn telemetry_install_id() -> String {
+    let file = publik_dir().join("telemetry.json");
+    let saved = || std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v["install_id"].as_str().map(str::to_lowercase)).filter(|id| is_uuid_v4(id));
+    if let Some(id) = saved() { return id; }
+    let fresh = uuid::Uuid::new_v4().to_string(); // if the file cannot be saved, this ID lasts for this run only
+    let _ = std::fs::create_dir_all(publik_dir());
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true); // never over another app's file
+    #[cfg(unix)]
+    { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+    match options.open(&file) {
+        Ok(mut f) => { let _ = writeln!(f, "{}", json!({ "install_id": fresh, "created_at": utc_now() })); fresh }
+        Err(_) => saved().unwrap_or(fresh), // another publik app saved its ID first
+    }
+}
+fn send_event(event: &str) {
+    let say = |result: &str| if std::env::var("PUBLIK_TELEMETRY_DEBUG").as_deref() == Ok("1") { eprintln!("publik-telemetry: {event} -> {result}"); };
+    if usage_off() { return say("off (opt-out)"); }
+    let install_id = telemetry_install_id(); // after the opt-out check: when usage counts are off, no telemetry.json is made
+    let key = std::env::var("PUBLIK_API_KEY").ok().or_else(|| read_credential().and_then(|c| c["key"].as_str().map(String::from))).filter(|k| k.starts_with("pk_"));
+    let mut body = json!({ "v": 1, "app": APP_SLUG, "install_id": install_id, "event": event, "app_version": APP_VERSION.trim_start_matches(['v', 'V']), "os": OS });
+    match std::env::consts::ARCH { "aarch64" => body["arch"] = json!("arm64"), "x86_64" => body["arch"] = json!("x64"), _ => {} }
+    let url = std::env::var("PUBLIK_TELEMETRY_URL").unwrap_or_else(|_| format!("{}/api/v1/telemetry", origin()));
+    let body = body.to_string();
+    let args = ["-m", "5", "-K", "-", "-X", "POST", url.as_str(), "-H", "content-type: application/json", "--data-raw", body.as_str()];
+    match curl(&args, &key.map(|k| key_config(&k)).unwrap_or_default()) { Ok((code, _)) => say(&code.to_string()), Err(e) => say(&e) }
+}
+/// Called by ensure_signed_in(). app_opened now, active_session every 30 minutes, on a background thread; never panics the app.
+pub fn start_telemetry() {
+    if TELEMETRY_STARTED.swap(true, Ordering::SeqCst) { return; }
+    let s: u64 = std::env::var("PUBLIK_TELEMETRY_INTERVAL_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(0); // tests only
+    let interval = Duration::from_secs(if (1..=86_400).contains(&s) { s } else { 1_800 });
+    std::thread::spawn(move || {
+        send_event("app_opened");
+        loop { std::thread::sleep(interval); send_event("active_session"); }
+    });
+}
+
+// ---------- publik API calls ----------
+/// A 402 renders its message plus exactly ONE link: this one.
+pub fn top_up_url_from_402(body: &Value) -> (String, Option<String>) {
+    let e = &body["error"];
+    (e["message"].as_str().unwrap_or("Not enough publik API balance.").into(), e["top_up_url"].as_str().map(String::from))
+}
+
+/// `POST /search`: web results for `q` (quote a phrase to find it exactly), one published price per search; Err = (message, top_up_url) from a 402 or a readable failure.
+pub fn search(base_url: &str, api_key: &str, q: &str, count: u8) -> Result<Vec<Value>, (String, Option<String>)> {
+    let (url, body) = (format!("{base_url}/search"), json!({ "q": q, "count": count }).to_string());
+    match curl(&["-m", "30", "-K", "-", "-X", "POST", &url, "-H", "content-type: application/json", "--data-raw", &body], &key_config(api_key)) {
+        Ok((200, v)) => Ok(v["results"].as_array().cloned().unwrap_or_default()),
+        Ok((402, v)) => Err(top_up_url_from_402(&v)),
+        Ok((c, _)) => Err((format!("publik API answered {c}."), None)),
+        Err(e) => Err((e, None)),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Under the 0059 policy an anonymous mint is $0.00 — the once-per-account
-    // $0.05 starter is granted when a computer links, not at mint time.
-    fn mint_fixture(key: Value) -> Value {
-        json!({
-            "install_id": "0f8e2c1a-1111-4222-8333-444455556666",
-            "key": key,
-            "key_id": "abc123def456",
-            "base_url": "https://publikhq.com/api/v1",
-            "claim_code": "HK7F-2QWD",
-            "claim_url": "https://publikhq.com/claim/HK7F-2QWD",
-            "claim_state": "anonymous",
-            "starter_micros": 0,
-            "balance_micros": 0,
-            "wallet": {"balance_micros": 0, "add_credit_url": "https://publikhq.com/dashboard/api/add",
-                       "top_up_url": "https://publikhq.com/claim/HK7F-2QWD"},
-            "disclosure": {"version": 1, "cost": "The cost sentence.", "data_path": "The data sentence."}
-        })
-    }
-
-    // An install minted while already bound to a signed-in account gets the
-    // lifetime $0.05 starter immediately, since there is no separate link step.
-    fn mint_fixture_claimed(key: Value) -> Value {
-        json!({
-            "install_id": "0f8e2c1a-1111-4222-8333-444455556666",
-            "key": key,
-            "key_id": "abc123def456",
-            "base_url": "https://publikhq.com/api/v1",
-            "claim_url": Value::Null,
-            "claim_state": "claimed",
-            "starter_micros": 50000,
-            "balance_micros": 50000,
-            "wallet": {"balance_micros": 50000, "add_credit_url": "https://publikhq.com/dashboard/api/add"},
-            "disclosure": {"version": 1, "cost": "The cost sentence.", "data_path": "The data sentence."}
-        })
-    }
 
     #[test]
     fn app_token_is_embedded() {
@@ -514,197 +345,35 @@ mod tests {
     }
 
     #[test]
-    fn block_from_fresh_mint() {
-        let b = block_from_mint(&mint_fixture(json!("pk_live_x")), &json!(null), "local-id").unwrap();
-        assert_eq!(b["key"], "pk_live_x");
-        assert_eq!(b["key_id"], "abc123def456");
-        assert_eq!(b["base_url"], "https://publikhq.com/api/v1");
-        assert_eq!(b["claim_url"], "https://publikhq.com/claim/HK7F-2QWD");
-        assert_eq!(b["install_id"], "0f8e2c1a-1111-4222-8333-444455556666");
-        assert_eq!(b["disclosure"]["cost"], "The cost sentence.");
+    fn the_gate_words() {
+        let s = gate_screen("sign_in", None, None, None);
+        assert_eq!(s.title, "Sign in with publik");
+        assert_eq!(s.buttons, vec![("sign_in", "Sign in with publik")]);
+        let u = gate_screen("unreachable", None, None, None);
+        assert_eq!(u.body, "publik is not reachable. Check your connection.");
+        assert_eq!(u.buttons, vec![("retry", "Retry")]);
+        let empty = json!({ "claim_state": "claimed", "account": { "handle": "mann" }, "plan": { "kind": "none", "label": null }, "balance_micros": 0 });
+        let c = gate_screen("choose", Some(&empty), None, None);
+        assert_eq!(c.title, "Choose how to pay for AI");
+        assert_eq!(c.body, "You are signed in as @mann. This app uses AI. Get a publik plan, or use your own key.");
+        let plan = json!({ "claim_state": "claimed", "account": { "handle": "mann" }, "plan": { "kind": "plan", "label": "Plus" }, "balance_micros": 0 });
+        let p = gate_screen("choose", Some(&plan), None, None);
+        assert_eq!(p.title, "Connect your plan");
+        assert_eq!(p.body, "You are signed in as @mann. Your plan: Plus. Connect it to use AI in this app, or use your own key.");
+        assert_eq!(p.buttons, vec![("connect", "Connect your plan"), ("own_key", "Use my own key")]);
     }
 
     #[test]
-    fn replay_keeps_the_key_on_disk_or_asks_for_a_remint() {
-        let prior = json!({"key": "pk_live_old", "install_id": "i"});
-        let b = block_from_mint(&mint_fixture(Value::Null), &prior, "i").unwrap();
-        assert_eq!(b["key"], "pk_live_old");
-        assert!(block_from_mint(&mint_fixture(Value::Null), &json!({"install_id": "i"}), "i").is_none());
+    fn a_plan_or_a_balance_counts_as_a_plan() {
+        assert!(!has_plan(&json!({ "plan": { "kind": "none" }, "balance_micros": 0 })));
+        assert!(has_plan(&json!({ "plan": { "kind": "pack" }, "balance_micros": 0 })));
+        assert!(has_plan(&json!({ "plan": { "kind": "none" }, "balance_micros": 1 })));
     }
 
     #[test]
-    fn status_seed_is_zero_for_an_anonymous_mint() {
-        let s = status_from_mint(&mint_fixture(json!("pk_live_x")));
-        assert_eq!(s["balance_micros"], 0);
-        assert_eq!(s["claim_state"], "anonymous");
-        assert_eq!(s["needs_credit"], false);
-    }
-
-    #[test]
-    fn status_seed_has_the_starter_balance_when_mint_is_account_bound() {
-        let s = status_from_mint(&mint_fixture_claimed(json!("pk_live_x")));
-        assert_eq!(s["balance_micros"], 50000);
-        assert_eq!(s["claim_state"], "claimed");
-        assert_eq!(s["needs_credit"], false);
-    }
-
-    #[test]
-    fn curl_output_parsing() {
-        let (code, v) = parse_curl_output("{\"key\":\"k\"}\n201").unwrap();
-        assert_eq!(code, 201);
-        assert_eq!(v["key"], "k");
-        assert!(parse_curl_output("\n000").is_err());
-        assert!(parse_curl_output("").is_err());
-    }
-
-    #[test]
-    fn mint_body_shape() {
-        let b = mint_body("iid");
-        assert_eq!(b["app_slug"], "publikclip");
-        assert_eq!(b["disclosure_version"], 1);
-        assert_eq!(b["dialects"], json!(["gemini"]));
-        assert_eq!(b["app_version"], env!("CARGO_PKG_VERSION"));
-        assert!(["macos", "windows", "linux"].contains(&b["os"].as_str().unwrap()));
-    }
-
-    #[test]
-    fn write_secrets_keeps_other_keys_and_is_0600() {
-        let dir = std::env::temp_dir().join(format!("publikclip-test-{}", new_install_id()));
-        let path = dir.join("secrets.json");
-        write_secrets_at(&path, &json!({"gemini_api_key": "AIza", "pexels_api_key": "px"})).unwrap();
-        let mut current = read_json(&path);
-        current["publik"] = json!({"key": "pk_live_x"});
-        write_secrets_at(&path, &current).unwrap();
-        let back = read_json(&path);
-        assert_eq!(back["gemini_api_key"], "AIza");
-        assert_eq!(back["pexels_api_key"], "px");
-        assert_eq!(back["publik"]["key"], "pk_live_x");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        }
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    // GET /wallet bodies (lib/publik-api/wallet.ts walletBody): anonymous
-    // carries a live claim code; claimed carries none.
-    fn wallet_anonymous() -> Value {
-        json!({
-            "claim_state": "anonymous",
-            "balance_micros": 0,
-            "starter": Value::Null,
-            "week": {"used_micros": 0},
-            "claim_code": "HK7F-2QWD",
-            "claim_url": "https://publikhq.com/claim/NEW1-CODE",
-            "add_credit_url": "https://publikhq.com/dashboard/api/add",
-            "top_up_url": "https://publikhq.com/claim/NEW1-CODE",
-            "base_url": "https://publikhq.com/api/v1"
-        })
-    }
-
-    fn wallet_claimed(balance: i64, starter_left: i64) -> Value {
-        json!({
-            "claim_state": "claimed",
-            "balance_micros": balance,
-            "starter": {"remaining_micros": starter_left, "expires_at": Value::Null},
-            "week": {"used_micros": 0},
-            "claim_code": Value::Null,
-            "claim_url": Value::Null,
-            "add_credit_url": "https://publikhq.com/dashboard/api/add",
-            "top_up_url": "https://publikhq.com/dashboard/api/add",
-            "base_url": "https://publikhq.com/api/v1"
-        })
-    }
-
-    #[test]
-    fn wallet_status_for_a_linked_computer_with_the_starter() {
-        let prior = status_from_mint(&mint_fixture(json!("pk_live_x")));
-        let s = status_from_wallet(&prior, &wallet_claimed(50000, 50000), 1.0).unwrap();
-        assert_eq!(s["claim_state"], "claimed");
-        assert_eq!(s["balance_micros"], 50000);
-        assert_eq!(s["starter_remaining_micros"], 50000);
-        assert_eq!(s["top_up_url"], "https://publikhq.com/dashboard/api/add");
-        assert_eq!(s["needs_credit"], false);
-        assert_eq!(s["disconnected"], false);
-        assert_eq!(s["starter_micros"], 0, "starter_micros stays what the mint said");
-    }
-
-    #[test]
-    fn wallet_status_needs_credit_only_at_zero_balance() {
-        let s = status_from_wallet(&json!({}), &wallet_anonymous(), 1.0).unwrap();
-        assert_eq!(s["claim_state"], "anonymous");
-        assert_eq!(s["balance_micros"], 0);
-        assert_eq!(s["starter_remaining_micros"], 0, "no starter block = none left");
-        assert_eq!(s["needs_credit"], true);
-        let used_up = status_from_wallet(&json!({}), &wallet_claimed(0, 0), 1.0).unwrap();
-        assert_eq!(used_up["needs_credit"], true);
-        let paid = status_from_wallet(&json!({}), &wallet_claimed(3_120_000, 0), 1.0).unwrap();
-        assert_eq!(paid["needs_credit"], false);
-    }
-
-    #[test]
-    fn wallet_status_clears_stale_call_state_and_keeps_the_rest() {
-        let prior = json!({
-            "balance_micros": 0, "claim_state": "anonymous", "needs_credit": true,
-            "disconnected": true, "reprovision": true, "error_type": "key_revoked",
-            "message": "old 402 line", "last_charge_micros": 1200, "week_used_micros": 9
-        });
-        let s = status_from_wallet(&prior, &wallet_claimed(50000, 50000), 2.0).unwrap();
-        assert_eq!(s["disconnected"], false);
-        assert_eq!(s["needs_credit"], false);
-        assert!(s.get("message").is_none() && s.get("reprovision").is_none() && s.get("error_type").is_none());
-        assert_eq!(s["last_charge_micros"], 1200);
-        assert_eq!(s["week_used_micros"], 9);
-        assert_eq!(s["updated_at"], 2.0);
-    }
-
-    #[test]
-    fn wallet_status_rejects_a_body_that_is_not_a_wallet() {
-        assert!(status_from_wallet(&json!({}), &json!({}), 1.0).is_none());
-        assert!(status_from_wallet(&json!({}), &json!({"balance_micros": 5}), 1.0).is_none());
-        assert!(status_from_wallet(&json!({}), &json!({"balance_micros": 5, "claim_state": "weird"}), 1.0).is_none());
-    }
-
-    #[test]
-    fn wallet_block_drops_the_claim_link_once_claimed() {
-        let block = block_from_mint(&mint_fixture(json!("pk_live_x")), &json!(null), "i").unwrap();
-        let claimed = block_from_wallet(&block, &wallet_claimed(50000, 50000));
-        assert_eq!(claimed["claim_state"], "claimed");
-        assert!(claimed["claim_url"].is_null());
-        assert_eq!(claimed["key"], "pk_live_x", "the key is never touched");
-        let anon = block_from_wallet(&block, &wallet_anonymous());
-        assert_eq!(anon["claim_state"], "anonymous");
-        assert_eq!(anon["claim_url"], "https://publikhq.com/claim/NEW1-CODE", "re-issued code wins");
-    }
-
-    #[test]
-    fn wallet_auth_failure_marks_disconnected() {
-        let prior = json!({"balance_micros": 50000, "claim_state": "claimed"});
-        let res = json!({"error": {"type": "key_revoked", "message": "revoked"}});
-        let s = status_after_auth_failure(&prior, 401, &res, 3.0);
-        assert_eq!(s["disconnected"], true);
-        assert_eq!(s["reprovision"], true);
-        assert_eq!(s["error_type"], "key_revoked");
-        assert_eq!(s["balance_micros"], 50000);
-        let s403 = status_after_auth_failure(&prior, 403, &json!({"error": {"type": "install_revoked"}}), 3.0);
-        assert_eq!(s403["reprovision"], false);
-    }
-
-    #[test]
-    fn linked_means_provisioned_claimed_and_connected() {
-        let ok = json!({"provisioned": true, "claim_state": "claimed", "status": {"disconnected": false}});
-        assert!(is_linked(&ok));
-        assert!(is_linked(&json!({"provisioned": true, "claim_state": "claimed", "status": {}})));
-        assert!(!is_linked(&json!({"provisioned": false, "claim_state": "claimed", "status": {}})));
-        assert!(!is_linked(&json!({"provisioned": true, "claim_state": "anonymous", "status": {}})));
-        assert!(!is_linked(&json!({"provisioned": true, "claim_state": "claimed", "status": {"disconnected": true}})));
-    }
-
-    #[test]
-    fn rfc3339_shape() {
-        let s = now_rfc3339();
-        assert_eq!(s.len(), 20);
-        assert!(s.ends_with('Z') && s.as_bytes()[10] == b'T');
+    fn the_slug_and_the_version_are_this_app() {
+        assert_eq!(APP_SLUG, "publikclip");
+        assert_eq!(APP_VERSION, env!("CARGO_PKG_VERSION"));
+        assert!(USES_AI);
     }
 }

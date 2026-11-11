@@ -36,12 +36,13 @@ export const api = {
     invoke<{ ok: boolean }>('ig_tool', { args: ['unlink', mediaId] }),
   igReject: (mediaId: string, jobId: string, clip: number) =>
     invoke<{ ok: boolean }>('ig_tool', { args: ['reject', mediaId, jobId, String(clip)] }),
-  /** cheap: the files on disk, no network */
+  /** cheap: the files on disk and the last wallet read, no network */
   publikStatus: () => invoke<PublikStatus>('publik_status'),
-  /** GET /wallet, rewrites the status file from the server's answer; offline returns the files */
+  /** GET /wallet through the publik module; offline the last wallet stays */
   publikRefresh: () => invoke<PublikStatus>('publik_refresh'),
-  publikProvision: () => invoke<PublikStatus>('publik_provision'),
-  publikDisconnect: () => invoke<PublikStatus>('publik_disconnect'),
+  /** the module's set_choice: Connect your plan, Use my own key, or ask again at the next start */
+  publikSetChoice: (choice: 'publik' | 'own_key' | null) =>
+    invoke<PublikStatus>('publik_set_choice', { choice }),
   /** one GET to GitHub's latest release on launch; offline it says nothing */
   checkUpdate: () => invoke<UpdateNotice>('check_update'),
   fileUrl: (path: string) => convertFileSrc(path),

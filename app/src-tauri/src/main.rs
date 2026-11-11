@@ -9,10 +9,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 mod publik;
-mod publik_telemetry;
+mod publik_gate;
 mod update;
 
 pub(crate) fn home_dir() -> PathBuf {
@@ -78,6 +78,43 @@ pub(crate) fn quiet_command(program: &str) -> Command {
     // every library it drives (yt-dlp titles, whisperX output) on UTF-8 too.
     cmd.env("PYTHONUTF8", "1");
     cmd
+}
+
+fn read_json(path: &std::path::Path) -> Value {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| json!({}))
+}
+
+/// ~/.publikclip/secrets.json: the person's own keys (Gemini, Pexels, Freesound,
+/// Jamendo). The publik key is not here: the publik module keeps it in the publik
+/// credential file (src/publik.rs credential_path()).
+pub(crate) fn read_secrets() -> Value {
+    read_json(&home_dir().join("secrets.json"))
+}
+
+/// Write the whole secrets object and chmod 600 — the one write path every
+/// own key goes through.
+pub(crate) fn write_secrets_at(path: &std::path::Path, current: &Value) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    fs::write(path, serde_json::to_string_pretty(current).unwrap()).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Merge one top-level field into secrets.json, keeping every other key.
+pub(crate) fn merge_secret(field: &str, value: Value) -> Result<(), String> {
+    let mut current = read_secrets();
+    current[field] = value;
+    write_secrets_at(&home_dir().join("secrets.json"), &current)
 }
 
 /// A checkpoint as text. Jobs written by publikclip 0.2.5 and earlier on
@@ -152,7 +189,7 @@ fn pipeline_invocation() -> (String, Vec<String>) {
 
 #[tauri::command]
 fn run_job(app: AppHandle, source: String, llm: Option<String>, captions: Option<String>) -> Result<(), String> {
-    publik::require_linked()?;
+    publik_gate::require_provider(llm.as_deref())?;
     let (program, base_args) = pipeline_invocation();
     std::thread::spawn(move || {
         let mut args = base_args.clone();
@@ -180,7 +217,7 @@ fn resume_job(
     captions: Option<String>,
     camera: Option<String>,
 ) -> Result<(), String> {
-    publik::require_linked()?;
+    publik_gate::require_provider(llm.as_deref())?;
     let (program, base_args) = pipeline_invocation();
     std::thread::spawn(move || {
         let mut args = base_args.clone();
@@ -332,7 +369,7 @@ fn list_job_dirs() -> Result<Vec<Value>, String> {
 
 #[tauri::command]
 fn save_gemini_key(key: String) -> Result<bool, String> {
-    publik::merge_secret("gemini_api_key", json!(key.trim()))?;
+    merge_secret("gemini_api_key", json!(key.trim()))?;
     Ok(true)
 }
 
@@ -456,7 +493,7 @@ fn save_clip_edits(job_id: String, edits: Value) -> Result<(), String> {
 fn save_pexels_key(key: String) -> Result<bool, String> {
     // Same merge + chmod 600 path as every other key (a Pexels-first user
     // used to get the umask default here).
-    publik::merge_secret("pexels_api_key", json!(key.trim()))?;
+    merge_secret("pexels_api_key", json!(key.trim()))?;
     Ok(true)
 }
 
@@ -654,6 +691,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(publik_gate::GateState::default())
         .invoke_handler(tauri::generate_handler![
             run_job,
             resume_job,
@@ -671,10 +709,11 @@ fn main() {
             save_clip_edits,
             save_pexels_key,
             export_clip,
-            publik::publik_provision,
-            publik::publik_status,
-            publik::publik_refresh,
-            publik::publik_disconnect,
+            publik_gate::publik_gate_ready,
+            publik_gate::publik_gate_press,
+            publik_gate::publik_status,
+            publik_gate::publik_refresh,
+            publik_gate::publik_set_choice,
             update::check_update,
             save_freesound_key,
             save_jamendo_key,
@@ -688,15 +727,11 @@ fn main() {
             run_audio_bootstrap
         ])
         .setup(|app| {
-            let _ = app.get_webview_window("main");
-            // Usage counts (publik telemetry v1): app_opened now, active_session
-            // every 30 minutes, from a background thread. The key is this
-            // computer's publik API key when there is one, never an own key.
-            publik_telemetry::start(
-                "publikclip",
-                env!("CARGO_PKG_VERSION"),
-                Some(Box::new(|| publik::read_secrets()["publik"]["key"].as_str().map(String::from))),
-            );
+            // Sign in with publik comes first: tauri.conf.json opens no window.
+            // The publik module's gate (src/publik.rs) runs on its own thread,
+            // draws its screens in a small window, and when the person is
+            // signed in it starts the usage counts and opens the main window.
+            publik_gate::start(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())

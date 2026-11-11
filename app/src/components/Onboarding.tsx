@@ -1,14 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import type { PublikStatus } from '../types'
-import {
-  LINK_STILL_REQUIRED,
-  LinkGateCard,
-  PUBLIK_DATA_PATH,
-  PUBLIK_PRE_SETUP,
-  PublikReady,
-  linkGate
-} from './PublikCard'
+import { PayChoice, PublikReady } from './PublikCard'
 
 /**
  * Three beats: what this is → pick the brain (publik API preselected, your
@@ -16,12 +9,10 @@ import {
  * module gets its own guided flow later (Settings → Connect Instagram), so
  * first-run stays under a minute.
  *
- * "Continue with publik API" is the consent moment: nothing is posted to
- * publik before that tap.
- *
- * Founder rule (2026-09-28): the flow cannot finish until this computer is
- * linked to a publik account (publik_refresh reports claimed), whichever
- * brain the user means to score with.
+ * Sign in with publik happened before this screen: the publik module's gate
+ * (src-tauri/src/publik.rs) runs before the main window opens, and it asked
+ * once how the app pays for AI. The publik card here shows that answer and
+ * lets the person change it.
  */
 
 interface Props {
@@ -35,34 +26,21 @@ export default function Onboarding({ onDone }: Props) {
   const [ollama, setOllama] = useState<{ running: boolean; models: string[] } | null>(null)
   const [brain, setBrain] = useState<'publik' | 'gemini' | 'ollama'>('publik')
   const [publik, setPublik] = useState<PublikStatus | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [note, setNote] = useState<string | null>(null)
 
   useEffect(() => {
     api.checkOllama().then(setOllama).catch(() => setOllama({ running: false, models: [] }))
-    // A reinstall on a computer that already has a key skips the mint; ask
-    // the server whether it is linked (no key = no network call).
-    api.publikRefresh().then((p) => p.provisioned && setPublik(p)).catch(() => null)
+    api
+      .publikRefresh()
+      .catch(() => api.publikStatus())
+      .then(setPublik)
+      .catch(() => null)
   }, [])
-
-  async function connectPublik() {
-    setBusy(true)
-    setNote(null)
-    try {
-      setPublik(await api.publikProvision())
-    } catch (err) {
-      setNote(String(err))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const linked = linkGate(publik) === 'linked'
 
   async function saveKey() {
     if (!key.trim()) return
     await api.saveGeminiKey(key)
     setSaved(true)
+    api.publikStatus().then(setPublik).catch(() => null)
   }
 
   return (
@@ -95,31 +73,18 @@ export default function Onboarding({ onDone }: Props) {
           <h2 className="ob-h2">Pick how moments get judged</h2>
           <div className="ob-cards">
             <div
-              className={`ob-card ${brain === 'publik' ? '' : 'dim'} ${linked ? 'done' : ''}`}
+              className={`ob-card ${brain === 'publik' ? '' : 'dim'} ${publik?.choice === 'publik' ? 'done' : ''}`}
               onClick={() => setBrain('publik')}
             >
               <h3>publik API <span className="chip chip-amber">preselected</span></h3>
-              {publik?.provisioned ? (
+              {publik ? (
                 <>
-                  <button className="btn-secondary" disabled>publik API ready ✓</button>
-                  {linked ? (
-                    <PublikReady publik={publik} />
-                  ) : (
-                    <LinkGateCard publik={publik} inline onChange={setPublik} />
-                  )}
+                  <PublikReady publik={publik} />
+                  <PayChoice publik={publik} onChange={setPublik} />
                 </>
               ) : (
-                <>
-                  <p>{PUBLIK_PRE_SETUP}</p>
-                  <p>{PUBLIK_DATA_PATH}</p>
-                  <div className="ob-key-row">
-                    <button className="btn-secondary" onClick={connectPublik} disabled={busy}>
-                      {busy ? 'Setting up…' : 'Continue with publik API'}
-                    </button>
-                  </div>
-                </>
+                <p className="publik-fine mono">Reading your publik account…</p>
               )}
-              {note && <p className="ig-message mono">{note}</p>}
             </div>
             <div
               className={`ob-card ${brain === 'gemini' ? '' : 'dim'} ${saved ? 'done' : ''}`}
@@ -130,7 +95,6 @@ export default function Onboarding({ onDone }: Props) {
                 Prefer your own Google key? Paste it here (aistudio.google.com);
                 publikclip then talks to Google directly.
               </p>
-              <p className="ob-required">{LINK_STILL_REQUIRED}</p>
               <div className="ob-key-row">
                 <input
                   type="password"
@@ -158,21 +122,13 @@ export default function Onboarding({ onDone }: Props) {
                     ? `Running locally (${ollama.models.filter((m) => !m.includes('embed')).slice(0, 2).join(', ') || 'no chat models'}). Zero cost, fully offline — scores are labeled "local estimate" because small models judge humor less reliably.`
                     : 'Not detected. Install ollama.com and pull a model (e.g. llama3.1:8b) to run fully offline.'}
               </p>
-              <p className="ob-required">{LINK_STILL_REQUIRED}</p>
             </div>
           </div>
           <p className="ob-fine">
             You can switch per-run. Everything else — transcription, laughter
             detection, speaker tracking, rendering — is local either way.
           </p>
-          {!linked && (
-            <p className="ob-fine">
-              {publik?.provisioned
-                ? 'Link your publik account to continue.'
-                : 'Press "Continue with publik API" above, then link your publik account.'}
-            </p>
-          )}
-          <button className="btn-primary" onClick={() => setStep(2)} disabled={!linked}>
+          <button className="btn-primary" onClick={() => setStep(2)}>
             Continue
           </button>
         </section>
