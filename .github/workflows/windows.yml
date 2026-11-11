@@ -72,9 +72,10 @@ jobs:
           npm ci
           npx tauri build --bundles nsis
 
-      - name: Install silently and launch the installed app
+      - name: Install silently and launch the installed app (Sign in with publik, self-test, usage counts)
         shell: pwsh
         run: |
+          $want = (Get-Content app/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
           $setup = Get-ChildItem app/src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
           if (-not $setup) { throw "no NSIS installer produced" }
           Write-Host "installer: $($setup.Name)"
@@ -86,11 +87,16 @@ jobs:
             Select-Object -First 1
           if (-not $exe) { throw "no app exe under $dir" }
           Write-Host "launching $($exe.FullName)"
-          Start-Process -FilePath $exe.FullName
-          Start-Sleep -Seconds 15
-          $proc = Get-Process -Name $exe.BaseName -ErrorAction Stop
-          Write-Host "app alive after 15s (pid $($proc.Id)) — killing"
-          Stop-Process -Id $proc.Id -Force
+          # A fake publik on 127.0.0.1; nothing goes to publikhq.com.
+          python .github/scripts/publik-gate-smoke.py $exe.FullName publikclip $want windows publikclip-gate-windows.json
+          if ($LASTEXITCODE -ne 0) { throw "the Sign in with publik check failed" }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: publikclip-gate-windows
+          path: publikclip-gate-windows.json
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
         with:

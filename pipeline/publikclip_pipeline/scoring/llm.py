@@ -10,8 +10,9 @@ generateContent); they differ in where the call goes, whose key rides the
 x-goog-api-key header, and who is billed. That difference is an Endpoint.
 
 Key resolution, publik mode: PUBLIK_API_KEY env var (+ PUBLIK_API_BASE_URL),
-then PUBLIKCLIP_HOME/secrets.json {"publik": {...}} (written by the app's
-onboarding), then the shared per-app file publik's convention names.
+then PUBLIKCLIP_HOME/secrets.json {"publik": {...}} (publikclip 0.2.7 and
+earlier wrote it there), then the publik credential file the app's publik
+module writes at Sign in with publik (config.publik_shared_file()).
 Gemini mode: PUBLIKCLIP_GEMINI_API_KEY env var, then secrets.json
 {"gemini_api_key": "..."}. Ollama needs no key — just a running daemon.
 """
@@ -176,8 +177,8 @@ def resolve_endpoint(llm_mode: str) -> Endpoint:
         cred = publik_credential()
         if not cred:
             raise LlmError(
-                "publik API isn't set up on this computer. Finish onboarding, "
-                "or switch to your own Gemini key or Ollama in Settings."
+                "publik API isn't set up on this computer. Open publikclip and "
+                "sign in with publik, or switch to your own Gemini key or Ollama."
             )
         models = cred.get("models") if isinstance(cred.get("models"), dict) else {}
         return Endpoint(

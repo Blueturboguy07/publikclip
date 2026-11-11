@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sign in with publik</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        font: 15px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
+        background: #0f0e0c;
+        color: #f3efe6;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      main { width: 100%; padding: 28px 32px; }
+      h1 { font-size: 20px; margin: 0 0 10px; letter-spacing: 0.01em; }
+      p { margin: 0 0 8px; color: #cfc8ba; }
+      .note { color: #f0a640; min-height: 1.5em; }
+      .buttons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+      button {
+        font: inherit;
+        font-weight: 600;
+        padding: 10px 18px;
+        border-radius: 8px;
+        border: 1px solid #f0a640;
+        background: #f0a640;
+        color: #141210;
+        cursor: pointer;
+      }
+      button.secondary { background: transparent; color: #f3efe6; border-color: #4a4538; }
+      button:disabled { opacity: 0.5; cursor: default; }
+    </style>
+  </head>
+  <body>
+    <main id="gate" aria-live="polite">
+      <h1 id="title">Sign in with publik</h1>
+      <p id="body"></p>
+      <p id="note" class="note"></p>
+      <div id="buttons" class="buttons"></div>
+    </main>
+    <script type="module" src="/src/gate.ts"></script>
+  </body>
+</html>

@@ -7,12 +7,13 @@ Everything lives under PUBLIKCLIP_HOME (default ~/.publikclip):
       bin/                managed binaries (yt-dlp)
       models/             downloaded model weights
       jobs/<job_id>/      per-job artifacts (media, audio, stage checkpoints)
-      secrets.json        keys (0600): publik API block, own Gemini key, Pexels
+      secrets.json        own keys (0600): Gemini, Pexels, Freesound, Jamendo
       publik-status.json  publik API balance line, written after every call
 
-The desktop shell and the CLI both use the same resolution (PUBLIKCLIP_HOME,
-else ~/.publikclip), so secrets.json written by onboarding is what the
-pipeline reads. Artifacts on disk are the source of truth — the DB only records
+The publik key is not here: the app's publik module keeps it in the publik
+credential file (publik_shared_file()). The desktop shell and the CLI both
+use the same resolution (PUBLIKCLIP_HOME, else ~/.publikclip), so
+secrets.json written by the app is what the pipeline reads. Artifacts on disk are the source of truth — the DB only records
 what should exist so a stage can decide whether to skip itself on resume.
 """
 

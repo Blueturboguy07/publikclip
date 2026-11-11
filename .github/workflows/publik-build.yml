@@ -74,8 +74,8 @@ jobs:
           echo "BIN=$BIN" >> "$GITHUB_ENV"
           echo "WANT=$WANT" >> "$GITHUB_ENV"
 
-      - name: Usage counts on the runner (local listener)
-        run: python3 .github/scripts/publik-telemetry-smoke.py "$APP/Contents/MacOS/$BIN" publikclip "$WANT" macos publikclip-telemetry-macos.json
+      - name: Sign in with publik, self-test and usage counts on the runner (local fake publik)
+        run: python3 .github/scripts/publik-gate-smoke.py "$APP/Contents/MacOS/$BIN" publikclip "$WANT" macos publikclip-telemetry-macos.json
 
       - name: Pack the .app (ditto keeps symlinks)
         run: |
@@ -125,7 +125,7 @@ jobs:
           npm ci
           npx tauri build --bundles nsis
 
-      - name: Install silently, then check the usage counts on the runner (local listener)
+      - name: Install silently, then check Sign in with publik and the usage counts (local fake publik)
         shell: pwsh
         run: |
           $want = (Get-Content app/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
@@ -146,8 +146,8 @@ jobs:
           Write-Host "bundled $uvVersion"
           if ($uvVersion -notmatch "^uv $([regex]::Escape($env:UV_VERSION))( |$)") { throw "bundled uv is not $env:UV_VERSION" }
           Write-Host "launching $($exe.FullName)"
-          python .github/scripts/publik-telemetry-smoke.py $exe.FullName publikclip $want windows publikclip-telemetry-windows.json
-          if ($LASTEXITCODE -ne 0) { throw "usage count check failed" }
+          python .github/scripts/publik-gate-smoke.py $exe.FullName publikclip $want windows publikclip-telemetry-windows.json
+          if ($LASTEXITCODE -ne 0) { throw "the Sign in with publik check failed" }
           Get-FileHash $setup.FullName -Algorithm SHA256 | Format-List
 
       - uses: actions/upload-artifact@v4
