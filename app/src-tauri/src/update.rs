@@ -4,9 +4,9 @@
 // fix shipped (the 0.2.2 builds kept showing a stale "$0.25 free" line for
 // hours after the server had changed, 2026-09-28). Offline or rate-limited,
 // it says nothing: a missing notice is never an error.
-use serde_json::{json, Value};
+use std::process::Stdio;
 
-use crate::publik::curl_request;
+use serde_json::{json, Value};
 
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/Blueturboguy07/publikclip/releases/latest";
 const RELEASES_PAGE: &str = "https://github.com/Blueturboguy07/publikclip/releases/latest";
@@ -45,11 +45,29 @@ pub(crate) fn notice_from(current: &str, release: &Value) -> Value {
     })
 }
 
+/// One GET through the system curl (no key, no body). The status code arrives on the trailing line.
+fn curl_get(url: &str, timeout_secs: u32) -> Result<(u16, Value), String> {
+    let timeout = timeout_secs.to_string();
+    let out = crate::quiet_command("curl")
+        .args(["-sS", "-m", &timeout, url, "-H", "accept: application/json", "-w", "\n%{http_code}"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("curl: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (payload, code) = text.rsplit_once('\n').unwrap_or(("", &text));
+    match code.trim().parse::<u16>().unwrap_or(0) {
+        0 => Err("not reachable".into()),
+        code => Ok((code, serde_json::from_str(payload).unwrap_or(json!({})))),
+    }
+}
+
 #[tauri::command]
 pub async fn check_update() -> Result<Value, String> {
     let current = env!("CARGO_PKG_VERSION");
     let quiet = json!({ "current": current, "latest": Value::Null, "update_available": false, "url": RELEASES_PAGE });
-    match curl_request("GET", LATEST_RELEASE_URL, None, None, 8) {
+    match curl_get(LATEST_RELEASE_URL, 8) {
         Ok((200, body)) => Ok(notice_from(current, &body)),
         _ => Ok(quiet),
     }
