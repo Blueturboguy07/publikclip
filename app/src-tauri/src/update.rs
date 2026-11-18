@@ -1,9 +1,11 @@
 // "A newer publikclip is out": one GET to GitHub's latest-release endpoint on
-// launch, compared with the version compiled into this binary. publikclip has
-// no self-updater, so without this a person on an old build never learns a
-// fix shipped (the 0.2.2 builds kept showing a stale "$0.25 free" line for
-// hours after the server had changed, 2026-09-28). Offline or rate-limited,
-// it says nothing: a missing notice is never an error.
+// launch, compared with the version compiled into this binary. Builds before
+// the self-updater (src/updates.rs) had only this notice, so without it a
+// person on an old build never learned a fix shipped (the 0.2.2 builds kept
+// showing a stale "$0.25 free" line for hours after the server had changed,
+// 2026-09-28). It stays as it is next to the updater: a link to the release
+// page, no download. Offline or rate-limited, it says nothing: a missing
+// notice is never an error.
 use std::process::Stdio;
 
 use serde_json::{json, Value};

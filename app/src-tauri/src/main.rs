@@ -14,6 +14,7 @@ use tauri::{AppHandle, Emitter};
 mod publik;
 mod publik_gate;
 mod update;
+mod updates;
 
 pub(crate) fn home_dir() -> PathBuf {
     if let Ok(custom) = std::env::var("PUBLIKCLIP_HOME") {
@@ -687,7 +688,9 @@ fn export_clip(path: String, title: Option<String>) -> Result<String, String> {
 }
 
 fn main() {
-    tauri::Builder::default()
+    // Updater test hook (PUBLIK_UPDATE_SELF_TEST): no window, no gate; see updates.rs.
+    let update_self_test = updates::self_test_mode();
+    updates::plugins(tauri::Builder::default())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -726,7 +729,16 @@ fn main() {
             audio_suggest,
             run_audio_bootstrap
         ])
-        .setup(|app| {
+        // Windows: the main window's Help menu holds "Check for Updates…" (updates.rs).
+        .on_page_load(updates::on_page_load)
+        .setup(move |app| {
+            if let Some(mode) = update_self_test {
+                updates::run_self_test(app.handle(), mode);
+                return Ok(());
+            }
+            // Update checks start at launch, before the gate, so a gate bug can be fixed by an update.
+            updates::install_menu(app.handle());
+            updates::start(app.handle());
             // Sign in with publik comes first: tauri.conf.json opens no window.
             // The publik module's gate (src/publik.rs) runs on its own thread,
             // draws its screens in a small window, and when the person is

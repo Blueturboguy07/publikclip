@@ -1,0 +1,268 @@
+# Proves the signed self-updater end to end on clean GitHub runners. Never run on a desk Mac.
+# Copied from GSpot (.github/workflows/updater-proof.yml) and adapted to app/ and this repo's builds.
+#
+# Builds publikclip N (0.0.1) and N+1 (0.0.2) with the release commands, compiled to read their
+# update feed from http://127.0.0.1:$FEED_PORT/latest.json (PUBLIK_UPDATE_ENDPOINT at build time;
+# plain HTTP on loopback needs dangerousInsecureTransportProtocol, set for these test builds only).
+# Each build adds two marker files to pipeline/ (UPDATER_PROOF_VERSION, UPDATER_PROOF_ONLY_IN_<v>),
+# so the proof can see that the update replaces the bundled pipeline. Nothing is stubbed: the
+# bundle is the real one (uv + the pipeline source; the Python env is fetched on first run).
+# Then, on macos-latest and windows-latest: install N, serve the feed in the job, and run N's
+# updater self-test (PUBLIK_UPDATE_SELF_TEST, app/src-tauri/src/updates.rs) against
+#   - a feed whose signature is from another key        -> refused, N stays on disk
+#   - a feed whose package has one byte changed          -> refused, N stays on disk
+#   - a feed that announces a version the signature does not name -> refused, N stays on disk
+#   - the good feed                                      -> N+1 installed, the app on disk reports N+1
+# macOS also checks that the updated app keeps the bundle id, the signing certificate and the
+# designated requirement (what TCC permissions are bound to). This repo holds no Developer ID
+# secrets, so both macOS builds are signed with one throwaway certificate (tests/updater/proof-macos.sh).
+# publikhq.com is blocked on the proof runners and PUBLIK_ORIGIN points nowhere: nothing reaches
+# production. Nothing is published: no release, no tag. Results: the job summaries and the
+# updater-proof-* artifacts.
+name: updater-proof
+
+on:
+  workflow_dispatch:
+  # A workflow_dispatch workflow can be started only once it is on the default branch; the push
+  # trigger lets it run from a branch before that.
+  push:
+    branches: ['feat/updater', 'updater/**']
+    paths: ['app/src-tauri/**', 'app/package.json', 'app/package-lock.json', 'scripts/updater-*', 'tests/updater/**', '.github/workflows/updater-proof.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: updater-proof-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DO_NOT_TRACK: '1'
+  PUBLIK_NO_AUTO_UPDATE: '1'
+  # The sign-in gate never runs in the self-test; if an app opens normally, it reaches nothing.
+  PUBLIK_ORIGIN: 'http://127.0.0.1:9'
+  FEED_PORT: '47390'
+  N: '0.0.1'
+  N1: '0.0.2'
+  # The uv that rides in the bundle (publik-build.yml).
+  UV_VERSION: '0.13.0'
+
+jobs:
+  build-macos:
+    name: Build macOS ${{ matrix.version }}
+    strategy:
+      matrix:
+        version: ['0.0.1', '0.0.2']
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+          shared-key: updater-proof
+          cache-on-failure: true
+
+      # The publik-build.yml command (no updater artifacts: the release packs the update bundle
+      # after Developer ID signing), plus the test version, the loopback feed and the markers.
+      - name: Build publikclip.app ${{ matrix.version }}
+        working-directory: app
+        env:
+          PUBLIK_UPDATE_ENDPOINT: http://127.0.0.1:${{ env.FEED_PORT }}/latest.json
+          VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$VERSION" > ../pipeline/UPDATER_PROOF_VERSION
+          touch "../pipeline/UPDATER_PROOF_ONLY_IN_$VERSION"
+          printf '{"version":"%s","plugins":{"updater":{"dangerousInsecureTransportProtocol":true}}}' "$VERSION" > "$RUNNER_TEMP/proof.conf.json"
+          npm ci
+          npx tauri build --bundles app --config "$RUNNER_TEMP/proof.conf.json"
+          APP=src-tauri/target/release/bundle/macos/publikclip.app
+          BIN="$APP/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "$VERSION"
+          lipo -archs "$BIN"
+          grep -q -a -F "127.0.0.1:$FEED_PORT/latest.json" "$BIN"
+          test "$(cat "$APP/Contents/Resources/resources/pipeline/UPDATER_PROOF_VERSION")" = "$VERSION"
+          test -x "$APP/Contents/Resources/resources/bin/uv"
+          echo "bundle size: $(du -sh "$APP" | cut -f1)"
+          mkdir -p ../dist
+          ditto -c -k --keepParent "$APP" "../dist/publikclip-$VERSION.app.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-macos-${{ matrix.version }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  build-windows:
+    name: Build Windows ${{ matrix.version }}
+    strategy:
+      matrix:
+        version: ['0.0.1', '0.0.2']
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+          shared-key: updater-proof
+          cache-on-failure: true
+
+      # The release.yml / publik-build.yml command with the update key: tauri build writes the
+      # installer and its .sig (createUpdaterArtifacts on, from --config).
+      - name: Build the installer ${{ matrix.version }}
+        working-directory: app
+        shell: pwsh
+        env:
+          PUBLIK_UPDATE_ENDPOINT: http://127.0.0.1:${{ env.FEED_PORT }}/latest.json
+          VERSION: ${{ matrix.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { Write-Error "The TAURI_SIGNING_PRIVATE_KEY secret is not set."; exit 1 }
+          Set-Content ..\pipeline\UPDATER_PROOF_VERSION $env:VERSION -Encoding ascii
+          New-Item -ItemType File -Force "..\pipeline\UPDATER_PROOF_ONLY_IN_$($env:VERSION)" | Out-Null
+          $cfg = Join-Path $env:RUNNER_TEMP "proof.conf.json"
+          '{"version":"' + $env:VERSION + '","bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"dangerousInsecureTransportProtocol":true}}}' | Set-Content $cfg -Encoding ascii
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx tauri build --bundles nsis --config $cfg
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $setup = "src-tauri/target/release/bundle/nsis/publikclip_$($env:VERSION)_x64-setup.exe"
+          New-Item -ItemType Directory -Force ..\dist | Out-Null
+          Copy-Item $setup, "$setup.sig" ..\dist\
+          Get-ChildItem ..\dist | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-windows-${{ matrix.version }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  proof-macos:
+    name: Proof on macos-latest
+    needs: build-macos
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      # For the Tauri CLI (tauri signer): the release pack script signs with it.
+      - name: Install the app's node packages
+        working-directory: app
+        run: npm ci
+
+      - name: Block publikhq.com, so a test can not touch production
+        run: |
+          echo "127.0.0.1 publikhq.com www.publikhq.com" | sudo tee -a /etc/hosts
+          sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder || true
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-macos-*
+          path: builds
+          merge-multiple: true
+
+      - name: Unpack N and N+1
+        run: |
+          uname -m; sw_vers
+          mkdir -p apps/N apps/N1
+          ditto -x -k "builds/publikclip-$N.app.zip" apps/N
+          ditto -x -k "builds/publikclip-$N1.app.zip" apps/N1
+
+      - name: Prove the updater
+        timeout-minutes: 20
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash tests/updater/proof-macos.sh apps/N/publikclip.app apps/N1/publikclip.app out
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: updater-proof-macos
+          path: out/
+          retention-days: 30
+
+  proof-windows:
+    name: Proof on windows-latest
+    needs: build-windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      # For the Tauri CLI (tauri signer), which makes the foreign-key signature.
+      - name: Install the app's node packages
+        working-directory: app
+        run: npm ci
+
+      - name: Block publikhq.com, so a test can not touch production
+        shell: pwsh
+        run: |
+          Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "`n127.0.0.1 publikhq.com`n127.0.0.1 www.publikhq.com"
+          ipconfig /flushdns | Out-Null
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-windows-*
+          path: builds
+          merge-multiple: true
+
+      - name: Prove the updater
+        shell: pwsh
+        timeout-minutes: 20
+        run: |
+          [System.Environment]::OSVersion.VersionString
+          $n = (Get-Item "builds/publikclip_$($env:N)_x64-setup.exe").FullName
+          $n1 = (Get-Item "builds/publikclip_$($env:N1)_x64-setup.exe").FullName
+          pwsh -NoProfile -File tests/updater/proof-windows.ps1 -N $n -N1 $n1 -Out out
+          exit $LASTEXITCODE
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: updater-proof-windows
+          path: out/
+          retention-days: 30
