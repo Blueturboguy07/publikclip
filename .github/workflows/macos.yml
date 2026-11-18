@@ -18,6 +18,8 @@ on:
 # publik telemetry is off on build machines: a test run is not a user.
 env:
   DO_NOT_TRACK: "1"
+  # No automatic update check while CI drives the app (app/src-tauri/src/updates.rs).
+  PUBLIK_NO_AUTO_UPDATE: "1"
 
 jobs:
   macos:

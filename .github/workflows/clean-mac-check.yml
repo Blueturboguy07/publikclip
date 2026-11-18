@@ -8,6 +8,11 @@ name: clean Mac check of a release file
 # publikhq.com is blocked on the runner: nothing reaches production. The app
 # opens with Sign in with publik; with publikhq.com blocked, the gate shows
 # "publik is not reachable" and waits, so the app stays up and sends nothing.
+# (Its update check also goes to publikhq.com, so it fails quietly here.)
+#
+# Then it checks the release's update files (scripts/updater-check-release.sh,
+# docs/updates.md): latest.json matches the files and this tag, both update
+# signatures verify, and the update bundle is the dmg's notarized app.
 
 on:
   workflow_dispatch:
@@ -18,6 +23,10 @@ on:
       version:
         description: "Expected app version, for example 0.2.8"
         required: true
+      updater:
+        description: "Check the update files (latest.json, .app.tar.gz, .sig). Off only for a release made before the updater (0.2.8 and older)."
+        type: boolean
+        default: true
 
 permissions:
   contents: write # a draft release and its files are readable only with push access
@@ -90,6 +99,34 @@ jobs:
           print("RESULT: " + ("PASS" if rows and not bad else "FAIL"))
           sys.exit(0 if rows and not bad else 1)
           PY
+
+      - name: Check out this repo's update tools
+        if: inputs.updater
+        uses: actions/checkout@v4
+        with:
+          path: self
+          sparse-checkout: |
+            scripts
+            app/src-tauri/tauri.conf.json
+          sparse-checkout-cone-mode: false
+
+      - name: The update files (what installed copies download)
+        if: inputs.updater
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p upd
+          cp "serve/publikclip_${VERSION}_aarch64.dmg" upd/
+          for f in latest.json "publikclip_${VERSION}_aarch64.app.tar.gz" "publikclip_${VERSION}_aarch64.app.tar.gz.sig" \
+                   "publikclip_${VERSION}_x64-setup.exe" "publikclip_${VERSION}_x64-setup.exe.sig"; do
+            gh release download "$TAG" -R "$GITHUB_REPOSITORY" --pattern "$f" --dir upd || echo "::error::the release has no $f"
+          done
+          ls -l upd
+          bash self/scripts/updater-check-release.sh upd "$VERSION" "$TAG" "$GITHUB_REPOSITORY"
 
       - uses: actions/upload-artifact@v4
         if: always()

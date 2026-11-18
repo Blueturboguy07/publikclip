@@ -95,6 +95,14 @@ computer's publik key. No video, transcript, file name or prompt is sent. Turn
 it off with `DO_NOT_TRACK=1` in the environment.
 Details: [publikhq.com/skills/telemetry.md](https://publikhq.com/skills/telemetry.md).
 
+## Updates
+
+publikclip updates itself. It checks `https://publikhq.com/api/updates/publikclip/latest.json`
+10 s after launch and once a day, downloads the new version in the background, checks its
+signature, and asks before it restarts. "Check for Updates…" is in the publikclip menu (macOS)
+and in the Help menu (Windows). `PUBLIK_NO_AUTO_UPDATE=1` turns the automatic checks off.
+A build from source updates to the next official release too. Details: [docs/updates.md](docs/updates.md).
+
 ## Layout
 
 ```

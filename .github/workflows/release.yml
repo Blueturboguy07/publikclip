@@ -13,6 +13,12 @@
 #     APPLE_ID                     Apple account email
 #     APPLE_PASSWORD               app-specific password
 #     APPLE_TEAM_ID                R5R3ZS54LV
+#     TAURI_SIGNING_PRIVATE_KEY    the publik update key (docs/updates.md); SET on this repo
+#     TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password; SET on this repo
+#
+# Besides the dmg and the setup.exe, a release carries the update files that installed copies
+# download (docs/updates.md): publikclip_<v>_aarch64.app.tar.gz + .sig (the stapled app from the
+# dmg), publikclip_<v>_x64-setup.exe.sig, and latest.json with absolute GitHub asset URLs.
 #
 # It refuses to publish rather than quietly shipping an unsigned build: an
 # unsigned dmg is the "publikclip is damaged and can't be opened" bug, and
@@ -57,9 +63,11 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          UPDATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           missing=""
-          for v in CERT CERT_PW IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+          # UPDATE_KEY: without it the release has no update files, and installed copies never update.
+          for v in CERT CERT_PW IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID UPDATE_KEY; do
             [ -n "${!v}" ] || missing="$missing $v"
           done
           if [ -n "$missing" ]; then
@@ -95,6 +103,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # No updater artifacts here (createUpdaterArtifacts is off in tauri.conf.json): the update
+        # bundle is packed below from the notarized, stapled app.
         run: |
           npm ci
           npx tauri build --bundles app,dmg
@@ -137,10 +147,29 @@ jobs:
           [ "$FAIL" = "0" ] || { echo "::error::a downloaded copy would still be refused"; exit 1; }
           echo "A downloaded copy opens with no warning."
 
+      # The updater installs exactly these bytes, so they are the notarized, stapled app that is
+      # in the dmg: an update keeps the Developer ID identity (and the TCC permissions bound to it).
+      - name: Pack the update bundle from the stapled app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          APP=app/src-tauri/target/release/bundle/macos/publikclip.app
+          xcrun stapler validate "$APP"
+          scripts/updater-pack-macos.sh "$APP" updater
+          ls -la updater
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
           path: app/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-updater
+          path: updater/
           if-no-files-found: error
 
   windows:
@@ -164,33 +193,77 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: app/src-tauri
-      - name: Build the NSIS installer
+      # With the update key, tauri build also writes <installer>.sig (createUpdaterArtifacts on
+      # from --config; tauri.conf.json keeps it off so a build from source needs no key).
+      - name: Build the NSIS installer and its update signature
         working-directory: app
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { Write-Error "The TAURI_SIGNING_PRIVATE_KEY secret is not set. The installer would have no update signature."; exit 1 }
+          $cfg = Join-Path $env:RUNNER_TEMP "updater.conf.json"
+          '{"bundle":{"createUpdaterArtifacts":true}}' | Set-Content $cfg -Encoding ascii
           npm ci
-          npx tauri build --bundles nsis
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx tauri build --bundles nsis --config $cfg
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem src-tauri/target/release/bundle/nsis | Format-Table Name, Length
       - uses: actions/upload-artifact@v4
         with:
           name: windows-setup
-          path: app/src-tauri/target/release/bundle/nsis/*.exe
+          path: |
+            app/src-tauri/target/release/bundle/nsis/*-setup.exe
+            app/src-tauri/target/release/bundle/nsis/*-setup.exe.sig
           if-no-files-found: error
 
   publish:
     needs: [macos, windows]
     runs-on: ubuntu-latest
     steps:
+      # The feed tool and the public key it checks every signature against.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          sparse-checkout: |
+            scripts
+            app/src-tauri/tauri.conf.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: actions/download-artifact@v4
         with:
           path: dist
-      - name: Attach both installers to the release
+      # latest.json: what publik serves at /api/updates/publikclip/latest.json once the release is
+      # scan-approved, byte for byte. Each url is this release's absolute asset URL; the tool
+      # refuses a signature that does not verify or that names another version.
+      - name: Write the update feed (latest.json)
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./app/src-tauri/tauri.conf.json').version")
+          [ "$TAG" = "v$VERSION" ] || { echo "::error::tag $TAG is not v$VERSION (tauri.conf.json)"; exit 1; }
+          MAC=$(find dist -type f -name "publikclip_${VERSION}_aarch64.app.tar.gz" | head -1)
+          WIN=$(find dist -type f -name "publikclip_${VERSION}_x64-setup.exe" | head -1)
+          { [ -n "$MAC" ] && [ -f "$MAC.sig" ]; } || { echo "::error::no macOS update bundle and .sig for $VERSION"; exit 1; }
+          { [ -n "$WIN" ] && [ -f "$WIN.sig" ]; } || { echo "::error::no Windows installer and .sig for $VERSION"; exit 1; }
+          node scripts/updater-latest-json.mjs --version "$VERSION" \
+            --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/" \
+            --platform "darwin-aarch64=$MAC" --platform "windows-x86_64=$WIN" \
+            --notes "publikclip $VERSION" --out dist/latest.json
+          cat dist/latest.json
+      - name: Attach the installers and the update files to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          find dist -type f \( -name '*.dmg' -o -name '*.exe' \) -print
+          FILES=$(find dist -type f \( -name '*.dmg' -o -name '*-setup.exe' -o -name '*.app.tar.gz' -o -name '*.sig' -o -name 'latest.json' \))
+          echo "$FILES"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
                  --title "publikclip $TAG" --generate-notes
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
-            $(find dist -type f \( -name '*.dmg' -o -name '*.exe' \))
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber $FILES

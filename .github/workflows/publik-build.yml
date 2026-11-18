@@ -3,6 +3,11 @@
 # notarized, stapled and packed into the dmg on the release Mac, the same way
 # as every release since 0.2.4 (this repo holds no Apple secrets).
 #
+# Update files (docs/updates.md): the Windows installer gets its update signature
+# (<installer>.sig) here, with the TAURI_SIGNING_PRIVATE_KEY secret. The macOS
+# update bundle is NOT made here: the .app is re-signed on the release Mac, and
+# scripts/updater-pack-macos.sh packs it there, after stapling.
+#
 # Artifacts only. This workflow never creates, changes or publishes a release.
 name: publik-build
 
@@ -21,6 +26,8 @@ concurrency:
 env:
   # The uv that rides in the bundle. 0.2.6 shipped 0.13.0; keep it the same.
   UV_VERSION: "0.13.0"
+  # No automatic update check while the gate check drives the app (app/src-tauri/src/updates.rs).
+  PUBLIK_NO_AUTO_UPDATE: "1"
 
 jobs:
   macos:
@@ -45,6 +52,8 @@ jobs:
         with:
           workspaces: app/src-tauri
 
+      # No updater artifacts (createUpdaterArtifacts is off in tauri.conf.json): an update bundle
+      # of this unsigned app must never ship. The release Mac packs one from the stapled app.
       - name: Build the app (unsigned)
         working-directory: app
         run: |
@@ -119,11 +128,22 @@ jobs:
         with:
           workspaces: app/src-tauri
 
-      - name: Build the NSIS installer (unsigned)
+      # Not code-signed. With the update key, tauri build also writes <installer>.sig
+      # (createUpdaterArtifacts on from --config; tauri.conf.json keeps it off for source builds).
+      - name: Build the NSIS installer (unsigned) and its update signature
         working-directory: app
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { Write-Error "The TAURI_SIGNING_PRIVATE_KEY secret is not set. The installer would have no update signature."; exit 1 }
+          $cfg = Join-Path $env:RUNNER_TEMP "updater.conf.json"
+          '{"bundle":{"createUpdaterArtifacts":true}}' | Set-Content $cfg -Encoding ascii
           npm ci
-          npx tauri build --bundles nsis
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx tauri build --bundles nsis --config $cfg
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install silently, then check Sign in with publik and the usage counts (local fake publik)
         shell: pwsh
@@ -149,11 +169,17 @@ jobs:
           python .github/scripts/publik-gate-smoke.py $exe.FullName publikclip $want windows publikclip-telemetry-windows.json
           if ($LASTEXITCODE -ne 0) { throw "the Sign in with publik check failed" }
           Get-FileHash $setup.FullName -Algorithm SHA256 | Format-List
+          # The update signature must verify against the pubkey in tauri.conf.json and name this version.
+          if (-not (Test-Path "$($setup.FullName).sig")) { throw "no update signature next to the installer" }
+          node scripts/updater-latest-json.mjs --version $want --base-url "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$want/" --platform "windows-x86_64=$($setup.FullName)" --out "$env:RUNNER_TEMP/latest-check.json"
+          if ($LASTEXITCODE -ne 0) { throw "the update signature does not verify" }
 
       - uses: actions/upload-artifact@v4
         with:
           name: publikclip-windows-setup
-          path: app/src-tauri/target/release/bundle/nsis/*-setup.exe
+          path: |
+            app/src-tauri/target/release/bundle/nsis/*-setup.exe
+            app/src-tauri/target/release/bundle/nsis/*-setup.exe.sig
           if-no-files-found: error
           compression-level: 0
 
