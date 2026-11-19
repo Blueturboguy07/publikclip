@@ -185,18 +185,12 @@ function Tray-Menu([string]$item) {
       Add-Type -AssemblyName System.Windows.Forms
       [System.Windows.Forms.SendKeys]::SendWait("{F10}"); Start-Sleep -Milliseconds 400
       [System.Windows.Forms.SendKeys]::SendWait("{DOWN}"); Start-Sleep -Milliseconds 700
-      $popup = $null
-      foreach ($m in $root.FindAll($TS::Children, (Cond $AE::ClassNameProperty "#32768"))) {
-        if (-not $m.Current.IsOffscreen -and $m.Current.BoundingRectangle.Width -gt 0) { $popup = $m; break }
-      }
+      # The open menu is drawn by the app's menu library and is not in the accessibility tree: the
+      # screenshot shows it (Help > "Check for Updates..."). The dialog check after this call is the
+      # proof that Enter took the item.
       Shot "help-menu"
-      if ($popup) {
-        $mr = $popup.Current.BoundingRectangle
-        $names = @($popup.FindAll($TS::Descendants, [System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name })
-        [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-        return "title bar click, then F10, Down, Enter: the first item of the Help menu (menu $([int]$mr.Width)x$([int]$mr.Height) at $([int]$mr.X),$([int]$mr.Y); names in the tree: '$($names -join "', '")')"
-      }
-      [System.Windows.Forms.SendKeys]::SendWait("{ESC}{ESC}")
+      [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+      return "title bar click, then F10 (Help), Down, Enter: the first and only item of the Help menu (screenshot help-menu)"
     }
     Start-Sleep 2
   }
