@@ -10,10 +10,10 @@
 
 on run argv
 	set cmd to item 1 of argv
-	set kind to item 2 of argv
+	set selKind to item 2 of argv
 	set what to item 3 of argv
 	tell application "System Events"
-		if kind is "pid" then
+		if selKind is "pid" then
 			set p to first process whose unix id is (what as integer)
 		else
 			if not (exists process what) then

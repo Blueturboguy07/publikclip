@@ -170,6 +170,24 @@ function Tray-Menu([string]$item) {
         }
       }
     }
+    # The menu bar is not in the accessibility tree of this window: click "Help" by its place (the
+    # first and only menu, at the left of the bar under the title bar), then the one item of the
+    # popup menu that opens.
+    foreach ($w in $wins) {
+      if ($w.Current.Name -ne "publikclip" -or $w.Current.ClassName -ne "Tauri Window") { continue }
+      try { $w.SetFocus() } catch {}
+      $r = $w.Current.BoundingRectangle
+      [Mouse]::Click([int]($r.X + 28), [int]($r.Y + 41))
+      Start-Sleep -Milliseconds 900
+      foreach ($m in $root.FindAll($TS::Children, (Cond $AE::ClassNameProperty "#32768"))) {
+        if ($m.Current.IsOffscreen -or $m.Current.BoundingRectangle.Width -le 0) { continue }
+        Shot "help-menu"
+        $mr = $m.Current.BoundingRectangle
+        $names = @($m.FindAll($TS::Descendants, [System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name })
+        [Mouse]::Click([int]($mr.X + $mr.Width / 2), [int]($mr.Y + $mr.Height / 2))
+        return "clicked Help at the left of the menu bar, then the one item of its menu (menu $([int]$mr.Width)x$([int]$mr.Height); names in the tree: '$($names -join "', '")')"
+      }
+    }
     Start-Sleep 2
   }
   return $null
