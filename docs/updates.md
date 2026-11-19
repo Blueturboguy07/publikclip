@@ -136,8 +136,8 @@ The key is shared by the publik apps (GSpot, publikclip and others). Rotate it i
 Run `updater-proof.yml`. It builds 0.0.1 and 0.0.2, installs 0.0.1 on `macos-latest` and
 `windows-latest`, and checks that 0.0.1 refuses three bad feeds and then updates to 0.0.2,
 with the bundled pipeline and uv. Then it starts 0.0.1 once more and checks that the restart
-question is on screen while the app keeps running. A push to `feat/updater` or `updater/**`
-also starts it. The macOS builds are signed with a throwaway certificate made on the runner,
+question is on screen while the app keeps running. Start it by hand (workflow_dispatch); no
+push starts it. The macOS builds are signed with a throwaway certificate made on the runner,
 because this repo holds no Developer ID secrets.
 
 The app has a test hook for this: `PUBLIK_UPDATE_SELF_TEST=version|check|install` runs the
