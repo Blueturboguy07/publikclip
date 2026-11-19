@@ -177,16 +177,26 @@ function Tray-Menu([string]$item) {
       if ($w.Current.Name -ne "publikclip" -or $w.Current.ClassName -ne "Tauri Window") { continue }
       try { $w.SetFocus() } catch {}
       $r = $w.Current.BoundingRectangle
-      [Mouse]::Click([int]($r.X + 28), [int]($r.Y + 41))
-      Start-Sleep -Milliseconds 900
+      "window rect $([int]$r.X),$([int]$r.Y) $([int]$r.Width)x$([int]$r.Height)" | Add-Content (Join-Path $Out "app-windows.txt")
+      # Focus by a click on the title bar, then the keyboard: F10 selects the first menu (Help),
+      # Down opens it, Enter takes its first (and only) item.
+      [Mouse]::Click([int]($r.X + $r.Width / 2), [int]($r.Y + 14))
+      Start-Sleep -Milliseconds 500
+      Add-Type -AssemblyName System.Windows.Forms
+      [System.Windows.Forms.SendKeys]::SendWait("{F10}"); Start-Sleep -Milliseconds 400
+      [System.Windows.Forms.SendKeys]::SendWait("{DOWN}"); Start-Sleep -Milliseconds 700
+      $popup = $null
       foreach ($m in $root.FindAll($TS::Children, (Cond $AE::ClassNameProperty "#32768"))) {
-        if ($m.Current.IsOffscreen -or $m.Current.BoundingRectangle.Width -le 0) { continue }
-        Shot "help-menu"
-        $mr = $m.Current.BoundingRectangle
-        $names = @($m.FindAll($TS::Descendants, [System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name })
-        [Mouse]::Click([int]($mr.X + $mr.Width / 2), [int]($mr.Y + $mr.Height / 2))
-        return "clicked Help at the left of the menu bar, then the one item of its menu (menu $([int]$mr.Width)x$([int]$mr.Height); names in the tree: '$($names -join "', '")')"
+        if (-not $m.Current.IsOffscreen -and $m.Current.BoundingRectangle.Width -gt 0) { $popup = $m; break }
       }
+      Shot "help-menu"
+      if ($popup) {
+        $mr = $popup.Current.BoundingRectangle
+        $names = @($popup.FindAll($TS::Descendants, [System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name })
+        [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+        return "title bar click, then F10, Down, Enter: the first item of the Help menu (menu $([int]$mr.Width)x$([int]$mr.Height) at $([int]$mr.X),$([int]$mr.Y); names in the tree: '$($names -join "', '")')"
+      }
+      [System.Windows.Forms.SendKeys]::SendWait("{ESC}{ESC}")
     }
     Start-Sleep 2
   }
