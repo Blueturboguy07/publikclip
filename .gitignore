@@ -33,3 +33,6 @@ secrets.json
 .env
 .env.*
 *.log
+
+# scripts/publik-release.sh work folders
+.release/

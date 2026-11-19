@@ -65,6 +65,12 @@ jobs:
           npm ci
           npx tauri build --bundles app,dmg
 
+      # After the build: the crate embeds app/dist and needs the staged resources/ dir.
+      # Among them: the updater's daily check on a paused (fake) clock (src/updates.rs).
+      - name: Rust unit tests
+        working-directory: app/src-tauri
+        run: cargo test --locked
+
       - name: The bundle must not carry a venv or a dev cache
         # prepare-resources.mjs excludes .venv/__pycache__/tests, and
         # uv_project_environment() keeps uv from creating one at runtime. If

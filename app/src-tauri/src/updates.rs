@@ -143,18 +143,27 @@ pub fn start(app: &AppHandle) {
         return;
     }
     let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(FIRST_CHECK_AFTER).await;
-        let mut last: Option<SystemTime> = None;
-        loop {
-            // A clock that moved back gives an error here; that counts as due.
-            if last.map_or(true, |t| t.elapsed().map_or(true, |e| e >= CHECK_EVERY)) {
-                last = Some(SystemTime::now());
-                check(app.clone(), false).await;
-            }
-            tokio::time::sleep(TICK).await;
+    tauri::async_runtime::spawn(auto_checks(SystemTime::now, move || check(app.clone(), false)));
+}
+
+/// The schedule of the automatic checks: `run` once FIRST_CHECK_AFTER after the start, then
+/// again when CHECK_EVERY has passed on the wall clock `now`, looked at every TICK. `now` is a
+/// parameter only so that the unit test can move the wall clock (as in GSpot).
+async fn auto_checks<F, Fut>(now: impl Fn() -> SystemTime, mut run: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    tokio::time::sleep(FIRST_CHECK_AFTER).await;
+    let mut last: Option<SystemTime> = None;
+    loop {
+        // A clock that moved back gives an error here; that counts as due.
+        if last.map_or(true, |t| now().duration_since(t).map_or(true, |e| e >= CHECK_EVERY)) {
+            last = Some(now());
+            run().await;
         }
-    });
+        tokio::time::sleep(TICK).await;
+    }
 }
 
 /// "Check for Updates…": the same check, with its result shown.
@@ -462,5 +471,53 @@ mod tests {
         assert_eq!(conf["plugins"]["updater"]["windows"]["installMode"], "passive");
         // base64 of "untrusted comment: minisign public key:", as `tauri signer generate` writes it.
         assert!(updater["pubkey"].as_str().unwrap().starts_with("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6"));
+    }
+
+    /// The daily check, with fake timers: tokio's paused clock runs the sleeps of `auto_checks`
+    /// (the code `start` runs), and the fake wall clock follows it plus a jump the test sets.
+    #[test]
+    fn the_automatic_check_runs_after_10_s_and_then_once_a_day() {
+        use super::{auto_checks, CHECK_EVERY, FIRST_CHECK_AFTER, TICK};
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, SystemTime};
+
+        assert_eq!(FIRST_CHECK_AFTER, Duration::from_secs(10));
+        assert_eq!(CHECK_EVERY, Duration::from_secs(24 * 60 * 60));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().start_paused(true).build().unwrap();
+        rt.block_on(async {
+            let start = tokio::time::Instant::now();
+            let wall_at_start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+            let jump = Arc::new(Mutex::new(Duration::ZERO));
+            let fired = Arc::new(Mutex::new(Vec::<u64>::new()));
+            let (j, f) = (jump.clone(), fired.clone());
+            let now = move || wall_at_start + start.elapsed() + *j.lock().unwrap();
+            let schedule = tokio::spawn(auto_checks(now, move || {
+                let f = f.clone();
+                async move { f.lock().unwrap().push(start.elapsed().as_secs()) }
+            }));
+            let checks = || fired.lock().unwrap().clone();
+            let day = CHECK_EVERY.as_secs();
+
+            tokio::time::sleep(Duration::from_secs(9)).await;
+            assert_eq!(checks(), Vec::<u64>::new(), "no check in the first 10 s");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            assert_eq!(checks(), vec![10], "the first check 10 s after the start");
+
+            tokio::time::sleep(CHECK_EVERY - TICK).await;
+            assert_eq!(checks(), vec![10], "no second check before a day has passed");
+            tokio::time::sleep(TICK).await;
+            assert_eq!(checks(), vec![10, 10 + day], "the second check a day after the first");
+            tokio::time::sleep(CHECK_EVERY).await;
+            assert_eq!(checks(), vec![10, 10 + day, 10 + 2 * day], "and then once a day");
+
+            // A Mac that slept: the wall clock moves on 25 h while the app's timers do not.
+            // The next look at the clock (one TICK later) finds the day over and checks.
+            *jump.lock().unwrap() += Duration::from_secs(25 * 60 * 60);
+            tokio::time::sleep(TICK).await;
+            let tick = TICK.as_secs();
+            assert_eq!(checks(), vec![10, 10 + day, 10 + 2 * day, 10 + 2 * day + tick], "a check soon after the wake");
+
+            schedule.abort();
+        });
     }
 }

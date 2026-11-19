@@ -20,6 +20,10 @@ uuid = { version = "1", features = ["v4"] }
 tauri-plugin-updater = "2.14"
 tokio = { version = "1", features = ["time"] }
 
+[dev-dependencies]
+# The daily-check test in src/updates.rs runs the schedule on tokio's paused clock (fake timers).
+tokio = { version = "1", features = ["rt", "time", "test-util"] }
+
 [profile.release]
 strip = true
 lto = true

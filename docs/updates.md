@@ -60,7 +60,24 @@ An update bundle of an app that is signed again later must never ship: it would 
 Developer ID identity. That is why the macOS bundle is made only by the pack script, from the
 stapled app.
 
-## Cut a release on the release Mac
+## Cut a release
+
+One command does the release for macOS and Windows, on the release Mac:
+
+```sh
+scripts/publik-release.sh <version>
+```
+
+The head of the script lists what to commit before it (the version in seven places) and each
+step: it waits for CI, takes the CI-built apps, signs and notarizes the Mac app with the
+keychain's Developer ID, makes the dmg, the update bundles and the signed feed, uploads a draft,
+downloads it back, checks every file, and publishes only when every check passed. Run the same
+command again after a failure.
+
+After publik's next intake (10:00 UTC), prove the update on clean runners:
+`gh workflow run live-update-proof.yml -f from_tag=v<old> -f expect_version=<version>`.
+
+## The same release by hand, on the release Mac
 
 This is how every release since 0.2.4 was made (this repo holds no Apple secrets).
 
