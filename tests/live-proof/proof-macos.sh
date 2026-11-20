@@ -363,7 +363,13 @@ else
     menu_check "publikclip $EXPECT is installed. Restart publikclip to use it."
     RC=$?
     shot later-menu-answer
-    check "[Later] menu: \"Check for Updates…\" asks again for the installed $EXPECT" "$MENU_HOW; $ANSWER" test "$RC" = 0
+    # GitHub's macOS runner sometimes takes System Events access from osascript in the middle of a job.
+    # Then the menu cannot be driven: that is a limit of the runner, not an answer of the app.
+    if [ "$RC" != 0 ] && [ -z "$MENU_HOW" ] && tail -n 1 "$OUT/osascript.log" 2>/dev/null | grep -q "not allowed assistive access"; then
+      note "[Later] menu: \"Check for Updates…\" not driven" "the runner refused System Events access to osascript; the Restart variant drove the same menu"
+    else
+      check "[Later] menu: \"Check for Updates…\" asks again for the installed $EXPECT" "$MENU_HOW; $ANSWER" test "$RC" = 0
+    fi
     press_in_dialog Later
     sleep 3
   else
