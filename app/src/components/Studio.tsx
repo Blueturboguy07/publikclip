@@ -139,9 +139,9 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
     if (!running) refreshPublik()
   }, [running, refreshPublik])
 
-  // The default brain follows the answer to the gate's "Choose how to pay for
-  // AI": publik API after Connect your plan, the own Gemini key after Use my
-  // own key. Once the user picks a brain this session, the picker is theirs.
+  // The default brain follows the stored pay choice: publik API (the gate
+  // stores it at sign-in, or Connect your plan), the own Gemini key after Use
+  // my own key. Once the user picks a brain this session, the picker is theirs.
   const provider = publik?.provider ?? null
   useEffect(() => {
     if (!provider || pickedBrain.current) return

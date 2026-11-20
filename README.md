@@ -73,10 +73,11 @@ Creative-Commons tracks from Freesound/Jamendo straight from the app.
 ## Sign in with publik
 
 publikclip opens with Sign in with publik. The first window asks you to sign
-in in your browser; the app continues when you are signed in. Then it asks once
-how it pays for AI: **Connect your plan** (scoring runs on publik API) or **Use
-my own key** (your Gemini key, or Ollama). Change the answer at any time under
-brain & keys. The publik module that does this is
+in in your browser; the app opens at once when you are signed in, with no pay
+screen: scoring runs on publik API. When your publik usage is at zero, the app
+shows publik's message and one link to get a plan. To use your own key (your
+Gemini key, or Ollama) instead, click **Use my own key** under brain & keys at
+any time. The publik module that does this is
 `app/src-tauri/src/publik.rs` (from
 [publikhq.com/sdk/publik.rs.md](https://publikhq.com/sdk/publik.rs.md)); its
 window is `app/src-tauri/src/publik_gate.rs` and `app/gate.html`. This

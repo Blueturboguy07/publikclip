@@ -53,8 +53,9 @@ export function PublikReady({ publik }: { publik: PublikStatus }) {
 
 /**
  * The setting the publik module asks for: set_choice("publik") after Connect
- * your plan, set_choice("own_key") after Use my own key, set_choice(null) to
- * see the gate's question again at the next start.
+ * your plan, set_choice("own_key") after Use my own key. The gate asks no pay
+ * question at start: after sign-in it stores "publik" when nothing is stored,
+ * and the app offers a plan only when publik API answers 402.
  */
 export function PayChoice({
   publik,
@@ -66,7 +67,7 @@ export function PayChoice({
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<string | null>(null)
 
-  async function choose(choice: 'publik' | 'own_key' | null) {
+  async function choose(choice: 'publik' | 'own_key') {
     setBusy(true)
     setNote(null)
     try {
@@ -95,9 +96,6 @@ export function PayChoice({
           disabled={busy || publik?.choice === 'own_key'}
         >
           Use my own key
-        </button>
-        <button className="btn-ghost" onClick={() => choose(null)} disabled={busy || !publik?.choice}>
-          Ask me again at the next start
         </button>
       </div>
       {note && <p className="ig-message mono">{note}</p>}

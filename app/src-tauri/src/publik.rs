@@ -2,7 +2,7 @@
 // At app start, before any window of your own: `let gate = publik::ensure_signed_in(&mut ui);`. It
 //   1. loads or provisions this computer's publik key (POST /api/v1/installs);
 //   2. shows Sign in with publik until GET /api/v1/wallet says "claimed" (no other way past it);
-//   3. when USES_AI: asks once how the app pays for AI and stores the answer (set_choice() changes it);
+//   3. when USES_AI: uses the publik account for AI, with no pay screen (set_choice() changes it);
 //   4. starts usage counting: app_opened now, active_session every 30 minutes (POST /api/v1/telemetry).
 //
 // This is the publik module from https://publikhq.com/sdk/publik.rs.md. publikclip's own glue
@@ -21,7 +21,7 @@ use std::time::Duration;
 
 pub const APP_SLUG: &str = "publikclip";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// false: the app calls no model. It still signs in and counts users; it skips the plan screen.
+/// false: the app calls no model. It still signs in and counts users; it stores no choice.
 pub const USES_AI: bool = true;
 /// Ask for a tier, never a vendor model name.
 pub const MODELS: [&str; 3] = ["publik-fast", "publik-balanced", "publik-smart"];
@@ -176,7 +176,7 @@ fn ask(ui: &mut dyn GateUi, screen: &Screen, key: &str, until: Option<fn(&Value)
 /// The gate (see the top of the file). Returns (key, wallet, choice) once the person is signed in; choice is None when USES_AI is false.
 pub fn ensure_signed_in(ui: &mut dyn GateUi) -> (String, Value, Option<String>) {
     if std::env::var_os("PUBLIK_SELF_TEST").is_some() { println!("{}", self_test()); std::process::exit(0); }
-    let (mut sign_note, mut sign_poll, mut plan_note, mut plan_poll): (Option<&'static str>, bool, Option<&'static str>, bool) = (None, true, None, false);
+    let (mut sign_note, mut sign_poll): (Option<&'static str>, bool) = (None, true);
     loop {
         let env_key = std::env::var("PUBLIK_API_KEY").ok().filter(|k| !k.is_empty());
         let c = match env_key.clone().map(|k| Ok(json!({ "key": k }))).or_else(|| read_credential().map(Ok)).unwrap_or_else(provision) {
@@ -200,19 +200,7 @@ pub fn ensure_signed_in(ui: &mut dyn GateUi) -> (String, Value, Option<String>) 
             continue;
         }
         let mut choice = if USES_AI { read_credential().and_then(|c| c["choice"].as_str().map(String::from)) } else { None };
-        if USES_AI && choice.is_none() {
-            if has_plan(&w) { (plan_note, plan_poll) = (None, false); } // the plan is there: Connect your plan
-            let a = ask(ui, &gate_screen("choose", Some(&w), plan_note, None), &key, if plan_poll { Some(has_plan) } else { None });
-            (plan_note, plan_poll) = (None, false);
-            if a == "get_plan" {
-                ui.open_url(w["top_up_url"].as_str().unwrap_or(&format!("{}/wallet", origin())));
-                (plan_note, plan_poll) = (Some("Waiting for your plan. Finish in your browser."), true);
-            }
-            if a == "timeout" { plan_note = Some("No plan after 10 minutes. Click Get a plan to try again."); }
-            if a != "connect" && a != "own_key" { continue; } // "done": the plan is there; the next screen is Connect your plan
-            choice = Some(if a == "connect" { "publik" } else { "own_key" }.to_string());
-            set_choice(choice.as_deref());
-        }
+        if USES_AI && choice.is_none() { choice = Some("publik".to_string()); set_choice(choice.as_deref()); } // no pay screen at start: publik is the choice; the app offers a plan when publik answers 402
         start_telemetry();
         return (key, w, choice);
     }

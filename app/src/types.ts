@@ -94,7 +94,7 @@ export interface PublikStatus {
   /** the publik module saw claim_state "claimed" for this computer's install */
   signed_in: boolean
   handle: string | null
-  /** the answer to "Choose how to pay for AI": Connect your plan / Use my own key / ask again */
+  /** how the app pays for AI: "publik" (stored by the gate at sign-in, or Connect your plan) / "own_key" (Use my own key) */
   choice: 'publik' | 'own_key' | null
   /** what resolve_provider() picks for a run: the install key, the own Gemini key, or neither yet */
   provider: 'publik' | 'own' | 'needs_own_key'

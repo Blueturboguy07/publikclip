@@ -1,6 +1,6 @@
 // publik_gate.rs — publikclip's glue around the publik module (src/publik.rs):
-//   * the Tauri window that draws the gate's screens (Sign in with publik, Choose how to
-//     pay for AI, Connect your plan) before the main window exists;
+//   * the Tauri window that draws the gate's screens (Sign in with publik, publik is not
+//     reachable) before the main window exists; the gate shows no pay screen;
 //   * the commands the main UI calls for the publik status and the pay choice;
 //   * the one-time move of a 0.2.7 key out of ~/.publikclip/secrets.json.
 // The module owns every call to publik; nothing here talks to the API on its own.
@@ -286,7 +286,7 @@ pub async fn publik_refresh(state: tauri::State<'_, GateState>) -> Result<Value,
 }
 
 /// The setting the module asks for: "publik" (Connect your plan), "own_key" (Use my own
-/// key), or null to ask again at the next start.
+/// key), or null (the gate stores "publik" again at the next start, with no screen).
 #[tauri::command]
 pub fn publik_set_choice(choice: Option<String>, state: tauri::State<'_, GateState>) -> Result<Value, String> {
     let choice = choice.filter(|c| c == "publik" || c == "own_key");

@@ -40,7 +40,7 @@ export const api = {
   publikStatus: () => invoke<PublikStatus>('publik_status'),
   /** GET /wallet through the publik module; offline the last wallet stays */
   publikRefresh: () => invoke<PublikStatus>('publik_refresh'),
-  /** the module's set_choice: Connect your plan, Use my own key, or ask again at the next start */
+  /** the module's set_choice: Connect your plan or Use my own key (null: the gate stores publik at the next start) */
   publikSetChoice: (choice: 'publik' | 'own_key' | null) =>
     invoke<PublikStatus>('publik_set_choice', { choice }),
   /** one GET to GitHub's latest release on launch; offline it says nothing */

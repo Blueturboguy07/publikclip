@@ -5,16 +5,21 @@ usage: publik-gate-smoke.py <app executable> <slug> <version> <macos|windows|lin
 
 A fake publik on 127.0.0.1 answers POST /api/v1/installs, GET /api/v1/wallet and
 POST /api/v1/telemetry. PUBLIK_ORIGIN points the app at it, so nothing goes to
-publikhq.com. Five launches:
+publikhq.com. Seven launches:
   1. self-test:  PUBLIK_SELF_TEST=1 prints "publik self-test: ok <slug> <version>" and exits 0,
                  after POST /installs and GET /wallet;
   2. signed out: the wallet says anonymous; the app provisions, shows the gate, stays up,
                  polls the wallet, and sends no usage event;
   3. opt-out:    signed in with DO_NOT_TRACK=1: no usage event, no telemetry.json;
   4. signed in:  one app_opened arrives with the install key; no new install is made;
-  5. 404:        POST /telemetry answers 404; the app stays up.
-"signed in" means a credential file with a fake key and the choice "publik", and a
-wallet that says claimed. Standard library only. Exit code 0 only when every run passes.
+  5. 404:        POST /telemetry answers 404; the app stays up;
+  6. no plan, no choice: signed in, no plan, no balance, no stored choice: the gate shows no
+                 pay screen (app_opened arrives: the gate returned) and stores the choice "publik";
+  7. own key:    signed in, no plan, the stored choice "own_key": app_opened arrives and the
+                 choice stays "own_key".
+"signed in" means a credential file with a fake key and the choice "publik" (runs 6 and 7:
+no choice, "own_key"), and a wallet that says claimed. Standard library only. Exit code 0
+only when every run passes.
 """
 import json
 import os
@@ -33,7 +38,7 @@ FAKE_KEY = "pk_live_smoke_0000000000000000"
 UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 FIELDS = {"v", "app", "install_id", "event", "app_version", "os", "arch"}
 received = []
-mode = {"claim_state": "anonymous", "telemetry_status": 204}
+mode = {"claim_state": "anonymous", "telemetry_status": 204, "has_plan": True}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -82,7 +87,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {
                 "claim_state": mode["claim_state"],
                 "account": {"handle": "smoke"} if claimed else None,
-                "plan": {"kind": "plan", "label": "Basic"} if claimed else {"kind": "none", "label": None},
+                "plan": {"kind": "plan", "label": "Basic"} if claimed and mode["has_plan"] else {"kind": "none", "label": None},
                 "balance_micros": 0,
                 "claim_url": None if claimed else origin + "/claim/SMOKE",
                 "top_up_url": origin + "/wallet?top_up=1",
@@ -132,7 +137,16 @@ def remove(path):
         pass
 
 
-def run(name, seconds, extra_env, signed_in, wait_for_exit=False):
+def stored_choice():
+    """The pay choice in the credential file now: a string, None, or "<no file>"."""
+    try:
+        with open(credential_file, encoding="utf-8") as handle:
+            return json.load(handle).get("choice")
+    except (OSError, ValueError):
+        return "<no file>"
+
+
+def run(name, seconds, extra_env, signed_in, wait_for_exit=False, choice="publik"):
     """One launch. Returns what happened and what was wrong."""
     app_home = tempfile.mkdtemp(prefix="publikclip-smoke-")  # PUBLIKCLIP_HOME: the app's own state
     remove(credential_file)
@@ -141,7 +155,7 @@ def run(name, seconds, extra_env, signed_in, wait_for_exit=False):
         os.makedirs(os.path.dirname(credential_file), exist_ok=True)
         with open(credential_file, "w", encoding="utf-8") as handle:
             json.dump({"key": FAKE_KEY, "base_url": base, "install_id": str(uuid.uuid4()),
-                       "claim_url": None, "choice": "publik"}, handle)
+                       "claim_url": None, "choice": choice}, handle)
     env = dict(os.environ)
     for unset in ("DO_NOT_TRACK", "PUBLIK_TELEMETRY", "PUBLIK_API_KEY", "PUBLIK_TELEMETRY_INTERVAL_SECONDS",
                   "PUBLIK_TELEMETRY_URL", "PUBLIK_SELF_TEST", "PUBLIK_APP_TOKEN"):
@@ -273,6 +287,31 @@ if len(report["telemetry_requests"]) != 1:
 result["runs"].append(report)
 result["problems"] += ["404 run: " + p for p in problems]
 mode["telemetry_status"] = 204
+
+# 6. signed in, no plan, no stored choice: no pay screen; the gate stores "publik" and the app opens
+# (app_opened is sent only after the gate returns, so a pay screen would hold it back)
+mode["has_plan"] = False
+report, problems = run("signed in, no plan, no stored choice", 15, {}, signed_in=True, choice=None)
+report["choice_after"] = stored_choice()
+if len(report["telemetry_requests"]) != 1:
+    problems.append("%d usage event(s) arrived, want 1 (a pay screen held the gate?)" % len(report["telemetry_requests"]))
+for record in report["telemetry_requests"]:
+    problems += check_event(record)
+if report["choice_after"] != "publik":
+    problems.append("the stored choice is %r, want 'publik'" % report["choice_after"])
+result["runs"].append(report)
+result["problems"] += ["no-choice run: " + p for p in problems]
+
+# 7. signed in, no plan, the stored choice "own_key": the app opens and the choice is kept
+report, problems = run("signed in, no plan, stored choice own_key", 15, {}, signed_in=True, choice="own_key")
+report["choice_after"] = stored_choice()
+if len(report["telemetry_requests"]) != 1:
+    problems.append("%d usage event(s) arrived, want 1" % len(report["telemetry_requests"]))
+if report["choice_after"] != "own_key":
+    problems.append("the stored choice is %r, want 'own_key' (kept)" % report["choice_after"])
+result["runs"].append(report)
+result["problems"] += ["own-key run: " + p for p in problems]
+mode["has_plan"] = True
 
 try:
     with open(id_file, encoding="utf-8") as handle:

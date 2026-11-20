@@ -10,9 +10,9 @@ import { PayChoice, PublikReady } from './PublikCard'
  * first-run stays under a minute.
  *
  * Sign in with publik happened before this screen: the publik module's gate
- * (src-tauri/src/publik.rs) runs before the main window opens, and it asked
- * once how the app pays for AI. The publik card here shows that answer and
- * lets the person change it.
+ * (src-tauri/src/publik.rs) runs before the main window opens. It shows no pay
+ * screen: it stores publik as the way the app pays for AI. The publik card here
+ * shows that choice and lets the person change it (Use my own key).
  */
 
 interface Props {
