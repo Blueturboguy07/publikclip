@@ -380,9 +380,13 @@ else
     shot later-menu-answer
     if [ -z "$MENU_HOW" ]; then
       MENU_HOW="$(real_menu_click)"
-      wait_for 60 dialog_says "publikclip $EXPECT is installed. Restart publikclip to use it."
-      RC=$?
-      ANSWER="$(dialog_texts)"
+      # Read the question from UserNotificationCenter only: the app's own process refuses the accessibility API here.
+      RC=1
+      for n in $(seq 1 30); do
+        ANSWER="$(texts_of UserNotificationCenter 2>/dev/null | tr '\n' ' ')"
+        case "$ANSWER" in *"publikclip $EXPECT is installed. Restart publikclip to use it."*) RC=0; break ;; esac
+        sleep 2
+      done
       shot later-menu-answer-real
     fi
     check "[Later] menu: \"Check for Updates…\" asks again for the installed $EXPECT" "$MENU_HOW; $ANSWER" test "$RC" = 0
