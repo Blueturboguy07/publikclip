@@ -106,6 +106,21 @@ dialog_texts() { { texts_of UserNotificationCenter; echo; [ -n "${PID:-}" ] && u
 dialog_says() { dialog_texts | grep -qF "$1"; }
 press_in_dialog() { press UserNotificationCenter "$1" || { [ -n "${PID:-}" ] && ui press pid "$PID" "$1" >/dev/null; }; }
 no_question() { local n; n="$(windows_of UserNotificationCenter)"; [ "${n:-0}" = 0 ]; }
+# The menu with real input: a click on the app's name in the menu bar, the item's first letters, Return.
+# For the state after "Later": the app's file on disk is the new version while the old one runs, and
+# macOS then refuses the accessibility API for that process ("not allowed assistive access").
+real_menu_click() {
+  [ -x "$WORK/click" ] || swiftc -O -o "$WORK/click" "$HERE/click.swift" 2>> "$OUT/osascript.log" || return 1
+  open "$APP"
+  sleep 3
+  "$WORK/click" 70 12 left
+  sleep 2
+  shot real-menu-open
+  "$WORK/click" type Check
+  sleep 1
+  "$WORK/click" key 36
+  echo "real mouse click on the app's name in the menu bar, then the keys C-h-e-c-k and Return"
+}
 # "Check for Updates…" in the app menu (menu bar item 2), then the answer. Sets MENU_HOW, ANSWER.
 menu_check() { # expected text
   local i
@@ -363,13 +378,14 @@ else
     menu_check "publikclip $EXPECT is installed. Restart publikclip to use it."
     RC=$?
     shot later-menu-answer
-    # GitHub's macOS runner sometimes takes System Events access from osascript in the middle of a job.
-    # Then the menu cannot be driven: that is a limit of the runner, not an answer of the app.
-    if [ "$RC" != 0 ] && [ -z "$MENU_HOW" ] && tail -n 1 "$OUT/osascript.log" 2>/dev/null | grep -q "not allowed assistive access"; then
-      note "[Later] menu: \"Check for Updates…\" not driven" "the runner refused System Events access to osascript; the Restart variant drove the same menu"
-    else
-      check "[Later] menu: \"Check for Updates…\" asks again for the installed $EXPECT" "$MENU_HOW; $ANSWER" test "$RC" = 0
+    if [ -z "$MENU_HOW" ]; then
+      MENU_HOW="$(real_menu_click)"
+      wait_for 60 dialog_says "publikclip $EXPECT is installed. Restart publikclip to use it."
+      RC=$?
+      ANSWER="$(dialog_texts)"
+      shot later-menu-answer-real
     fi
+    check "[Later] menu: \"Check for Updates…\" asks again for the installed $EXPECT" "$MENU_HOW; $ANSWER" test "$RC" = 0
     press_in_dialog Later
     sleep 3
   else
